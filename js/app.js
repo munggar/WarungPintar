@@ -1345,7 +1345,7 @@ const A = {
 
 const OWNER_ONLY_ACTIONS = new Set([
   'addprod', 'editprod', 'delprod', 'addpurchase', 'addexp', 'addwd', 'delmoney',
-  'manualdebt', 'csv', 'xlsx', 'print', 'saveprofile', 'confirm-qris', 'cancel-qris',
+  'manualdebt', 'csv', 'xlsx', 'print', 'saveprofile',
   'save-qris', 'delete-qris', 'transfer-account', 'delete-transfer-account', 'manage-assistants', 'remove-assistant',
   'rotate-recovery', 'backup', 'demo', 'reset',
 ]);
