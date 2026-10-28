@@ -285,6 +285,11 @@ dialog::backdrop { background: rgba(23,32,51,.55); }
 
 @media (min-width: 720px) { body { font-size: 18px; } .pgrid { max-height: 48vh; } }
 @media (max-width: 520px) {
+  .top-r #net, .top-r #sync { display: none; }
+  .top-r { width: auto; max-width: 52%; }
+  .top-r #role { gap: 4px; }
+  .top-r #role > .chip:first-child { max-width: 116px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .top-r #role .btn { min-height: 34px; height: 34px; padding-inline: 10px; font-size: .76rem; }
   .toast { top: auto; right: 12px; bottom: calc(76px + env(safe-area-inset-bottom)); left: 12px; width: auto; transform: translateY(12px) scale(.98); }
   .toast.show { transform: translateY(0) scale(1); }
   .top { align-items: flex-start; padding-left: 12px; padding-right: 12px; }
