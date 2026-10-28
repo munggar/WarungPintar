@@ -22,6 +22,22 @@ a { color: var(--biru); }
 .neg { color: var(--merah) !important; }
 .pos { color: var(--hijau); }
 
+/* Splash layar pembuka: tampil dari HTML pertama kali agar Android dan PWA juga menampilkan nama serta slogan. */
+.app-splash {
+  position: fixed; inset: 0; z-index: 9999; display: grid; place-items: center;
+  min-height: 100%; min-height: 100dvh; padding: calc(24px + env(safe-area-inset-top)) 24px calc(24px + env(safe-area-inset-bottom));
+  background: #fff; transition: opacity .28s ease, visibility .28s ease;
+}
+.app-splash-brand { display: flex; flex-direction: column; align-items: center; text-align: center; transform: translateY(-2vh); }
+.app-splash img { width: clamp(132px, 32vw, 190px); height: auto; margin-bottom: 18px; }
+.app-splash-name { font-family: "Arial Rounded MT Bold", "Segoe UI", sans-serif; font-size: clamp(2.15rem, 10vw, 3.35rem); line-height: 1; letter-spacing: -1px; }
+.app-splash-name span { color: #10152f; font-weight: 800; }
+.app-splash-name strong { position: relative; color: #2563eb; font-weight: 800; }
+.app-splash-name strong::before { content: ""; position: absolute; left: 18%; right: 2%; top: -.16em; height: 8px; border-top: 6px solid #ffc400; border-radius: 50%; transform: rotate(-12deg); }
+.app-splash-brand p { margin-top: 14px; color: #5d6375; font-size: clamp(.78rem, 3.2vw, 1rem); letter-spacing: 1px; }
+body.app-ready .app-splash { opacity: 0; visibility: hidden; pointer-events: none; }
+@media (prefers-reduced-motion: reduce) { .app-splash { transition: none; } }
+
 /* Header */
 .top {
   background: var(--biru); color: #fff; padding: calc(10px + env(safe-area-inset-top)) 16px 12px;
