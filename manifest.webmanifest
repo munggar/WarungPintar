@@ -1,15 +1,16 @@
 {
-  "name": "WarungPintar",
-  "short_name": "WarungPintar",
+  "name": "Warung Pintar",
+  "short_name": "Warung Pintar",
   "description": "Kasir, stok, kasbon, dan laporan untung rugi untuk UMKM. Jalan tanpa internet.",
   "lang": "id",
   "start_url": "./index.html",
   "scope": "./",
   "display": "standalone",
   "orientation": "portrait",
-  "background_color": "#f6f7f2",
+  "background_color": "#ffffff",
   "theme_color": "#1f3f9c",
   "icons": [
+    { "src": "icons/icon-128.png", "sizes": "128x128", "type": "image/png", "purpose": "any" },
     { "src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
     { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
     { "src": "icons/icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }

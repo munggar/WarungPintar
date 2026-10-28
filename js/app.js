@@ -15,27 +15,8 @@ const fmtDate = (d) => new Date(d).toLocaleDateString('id-ID', { day: 'numeric',
 const fmtTime = (d) => new Date(d).toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' });
 const pct = (x) => (x * 100).toFixed(1).replace('.', ',') + '%';
 
-let activeLoads = 0;
-let loadingTimer;
-function withLoading(task, message = 'Memproses permintaan...', { showLoader = true } = {}) {
-  if (showLoader) {
-    activeLoads += 1;
-    $('#loading-message').textContent = message;
-    if (activeLoads === 1) {
-      loadingTimer = setTimeout(() => {
-        if (activeLoads) $('#boot-loader').classList.add('is-loading');
-      }, 120);
-    }
-  }
-  return Promise.resolve().then(task).finally(() => {
-    if (showLoader) {
-      activeLoads -= 1;
-      if (!activeLoads) {
-        clearTimeout(loadingTimer);
-        $('#boot-loader').classList.remove('is-loading');
-      }
-    }
-  });
+function withLoading(task, _message = 'Memproses permintaan...', { showLoader = true } = {}) {
+  return Promise.resolve().then(task);
 }
 
 const S = {

@@ -5,18 +5,19 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="theme-color" content="#1f3f9c">
   <meta name="description" content="WarungPintar: pencatatan penjualan, stok, kasbon, dan laporan untung rugi untuk warung dan UMKM. Bisa dipakai tanpa internet.">
-  <link rel="manifest" href="manifest.webmanifest">
-  <link rel="icon" href="icons/icon.svg" type="image/svg+xml">
-  <link rel="apple-touch-icon" href="icons/icon-192.png">
-  <link rel="stylesheet" href="css/style.css?v=35">
-  <title>WarungPintar</title>
+  <link rel="manifest" href="manifest.webmanifest?v=37">
+  <link rel="icon" href="icons/app-icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" sizes="192x192" href="icons/icon-192.png">
+  <link rel="apple-touch-startup-image" media="(device-width: 390px) and (device-height: 844px) and (-webkit-device-pixel-ratio: 3)" href="icons/splash-1170x2532.png">
+  <link rel="apple-touch-startup-image" media="(device-width: 375px) and (device-height: 812px) and (-webkit-device-pixel-ratio: 3)" href="icons/splash-1125x2436.png">
+  <link rel="apple-touch-startup-image" media="(min-device-width: 768px)" href="icons/splash-2048x2732.png">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
+  <meta name="apple-mobile-web-app-title" content="Warung Pintar">
+  <link rel="stylesheet" href="css/style.css?v=37">
+  <title>Warung Pintar</title>
 </head>
 <body>
-  <div id="boot-loader" class="boot-loader" role="status" aria-live="polite">
-    <span class="boot-spinner" aria-hidden="true"></span>
-    <strong>WarungPintar</strong>
-    <span id="loading-message">Memuat aplikasi...</span>
-  </div>
   <header class="top no-print">
     <div><p class="brand" id="toko">WarungPintar</p><h1 id="judul">Beranda</h1></div>
     <div class="top-r"><span id="net" class="chip ok">Online</span><span id="sync"></span><span id="role"></span></div>
@@ -26,6 +27,6 @@
   <dialog id="dlg"></dialog>
   <div id="toast" class="toast" role="status"></div>
   <noscript><p>WarungPintar membutuhkan JavaScript.</p></noscript>
-  <script type="module" src="js/app.js?v=35"></script>
+  <script type="module" src="js/app.js?v=37"></script>
 </body>
 </html>
