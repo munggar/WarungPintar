@@ -72,6 +72,19 @@ test('IndexedDB menyimpan vault terenkripsi dan transaksi stok tetap atomik', as
   const savedPayments = await db.all('payments');
   assert.equal(L.debtRemaining((await db.all('debts')).find((debt) => debt.id === 'debt-1'), savedPayments), 10000);
 
+  await db.atomic(['purchases', 'expenses', 'withdrawals', 'customers', 'settings'], (store) => {
+    store('purchases').put({ id: 'purchase-1', qty: 3 });
+    store('expenses').put({ id: 'expense-1', jumlah: 1000 });
+    store('withdrawals').put({ id: 'withdrawal-1', jumlah: 500 });
+    store('customers').put({ id: 'customer-1', nama: 'Pelanggan tetap' });
+    store('settings').put({ key: 'toko', value: 'Toko tetap' });
+  });
+  await db.clearTransactions();
+  for (const store of db.TRANSACTION_STORES) assert.deepEqual(await db.all(store), []);
+  assert.equal((await db.all('products')).find((product) => product.id === 'product-1').stok, 3);
+  assert.equal((await db.all('customers'))[0].nama, 'Pelanggan tetap');
+  assert.deepEqual(await db.all('settings'), [{ key: 'toko', value: 'Toko tetap' }]);
+
   db.lockVault();
   await assert.rejects(db.all('products'), /terkunci/);
   await db.configureVault(key);

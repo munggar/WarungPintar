@@ -4,6 +4,7 @@ import { decryptJson, encryptJson } from './crypto.js';
 const DB_NAME = 'warungpintar';
 const VERSION = 2;
 export const STORES = ['products', 'sales', 'purchases', 'expenses', 'customers', 'debts', 'payments', 'withdrawals', 'settings'];
+export const TRANSACTION_STORES = ['sales', 'purchases', 'expenses', 'debts', 'payments', 'withdrawals'];
 let dbp;
 let vaultKey = null;
 let vault = null;
@@ -314,4 +315,8 @@ export async function importAll(data) {
 
 export async function wipe() {
   await atomic(STORES, (store) => STORES.forEach((name) => store(name).clear()));
+}
+
+export async function clearTransactions() {
+  await atomic(TRANSACTION_STORES, (store) => TRANSACTION_STORES.forEach((name) => store(name).clear()));
 }

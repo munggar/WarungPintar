@@ -207,6 +207,24 @@ test('QRIS menunggu konfirmasi dan transaksi yang dibatalkan tidak dihitung dala
   assert.deepEqual([completed, cancelled, pending, failed].map(L.saleCountsAsRevenue), [true, false, false, false]);
 });
 
+test('transaksi QRIS yang dikonfirmasi berpindah ke urutan transaksi terbaru', () => {
+  const recent = sale('2025-10-20T12:00:00', [item('a', 1, 10000, 5000)], {
+    statusPembayaran: 'berhasil',
+    dibayarPada: '2025-10-21T09:00:00.000Z',
+  });
+  const newerBySaleTime = sale('2025-10-21T08:00:00', [item('b', 1, 12000, 6000)]);
+  const pending = sale('2025-10-20T11:00:00', [item('c', 1, 5000, 2000)], { statusPembayaran: 'menunggu_konfirmasi' });
+  assert.deepEqual(L.recentSales([pending, newerBySaleTime, recent]).map((item) => item.id), [
+    recent.id,
+    newerBySaleTime.id,
+    pending.id,
+  ]);
+  assert.deepEqual(L.recentSales([pending, newerBySaleTime, recent], 2).map((item) => item.id), [
+    recent.id,
+    newerBySaleTime.id,
+  ]);
+});
+
 test('CSV meloloskan tanda kutip dan menetralkan sel formula', () => {
   assert.equal(L.csvCell('Produk "A"'), '"Produk ""A"""');
   assert.equal(L.csvCell('=HYPERLINK("https://example.invalid")'), `"'=HYPERLINK(""https://example.invalid"")"`);

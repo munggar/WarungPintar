@@ -38,6 +38,9 @@ async function request(path, options = {}, retry = true) {
     if (path === '/functions/v1/register-owner' && error instanceof TypeError) {
       throw new Error('Tidak dapat menghubungi fungsi pendaftaran. Deploy register-owner ke project Supabase dengan `npx supabase functions deploy register-owner`, lalu coba lagi.');
     }
+    const isNetworkFailure = error instanceof TypeError
+      || /failed to fetch|networkerror|load failed/i.test(error?.message || '');
+    if (isNetworkFailure) throw new Error('Tidak dapat terhubung ke server. Periksa koneksi internet lalu coba lagi.');
     throw error;
   }
   if (response.status === 401 && retry && current?.refresh_token && !path.startsWith('/auth/v1/token')) {

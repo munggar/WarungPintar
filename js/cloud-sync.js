@@ -10,6 +10,15 @@ const hasLocalBusinessData = (data) =>
     .some((store) => (data[store] || []).length > 0);
 const syncKey = (storeId) => `warungpintar:revision:${storeId}`;
 const OFFLINE_KEY = 'warungpintar:offline-account';
+
+function rememberRevision(storeId, revision) {
+  localStorage.setItem(syncKey(storeId), String(revision));
+  const cached = JSON.parse(localStorage.getItem(OFFLINE_KEY) || 'null');
+  if (cached?.storeId === storeId) {
+    cached.revision = revision;
+    localStorage.setItem(OFFLINE_KEY, JSON.stringify(cached));
+  }
+}
 const DEVICE_DB = 'warungpintar-remembered-device';
 const DEVICE_STORE = 'keys';
 let context = null;
@@ -141,7 +150,7 @@ async function pushCloudData(data, revision) {
   );
   if (!rows?.length) return false;
   context.revision = nextRevision;
-  localStorage.setItem(syncKey(context.storeId), String(nextRevision));
+  rememberRevision(context.storeId, nextRevision);
   return true;
 }
 
@@ -230,7 +239,7 @@ export async function connect(password, recoveryCode = '', { startEmpty = false 
     const restored = db.vaultSnapshot();
     await db.markSynced(restored.generation);
   }
-  localStorage.setItem(syncKey(context.storeId), String(context.revision));
+  rememberRevision(context.storeId, context.revision);
   setStatus('Tersinkron ke cloud', 'ok');
   return {
     user,
@@ -257,7 +266,7 @@ export async function resolveInitialConflict(choice, remoteData, remoteRevision)
     await db.markSynced(latest.generation);
     context.revision = remoteRevision;
   }
-  localStorage.setItem(syncKey(context.storeId), String(context.revision));
+  rememberRevision(context.storeId, context.revision);
 }
 
 export function currentContext() {
@@ -343,9 +352,19 @@ export async function syncNow() {
     const cloudData = await readCloudData(context.storeId);
     const local = db.vaultSnapshot();
     if (!cloudData) throw new Error('Data cloud toko tidak ditemukan.');
+    const cloudRevision = Number(cloudData.revision);
     if (local.dirty) {
+      if (cloudRevision !== context.revision) {
+        pendingConflict = { data: await decryptJson(context.dataKey, cloudData), revision: cloudRevision };
+        setStatus('Konflik perubahan — perlu keputusan', 'warn');
+        return { conflict: true, ...pendingConflict };
+      }
       if (!await pushCloudData(local.data, context.revision)) {
-        pendingConflict = { data: await decryptJson(context.dataKey, cloudData), revision: Number(cloudData.revision) };
+        const latestCloudData = await readCloudData(context.storeId);
+        pendingConflict = {
+          data: await decryptJson(context.dataKey, latestCloudData),
+          revision: Number(latestCloudData.revision),
+        };
         setStatus('Konflik perubahan — perlu keputusan', 'warn');
         return { conflict: true, ...pendingConflict };
       }
@@ -359,11 +378,16 @@ export async function syncNow() {
       const latest = db.vaultSnapshot();
       await db.markSynced(latest.generation);
       context.revision = Number(cloudData.revision);
-      localStorage.setItem(syncKey(context.storeId), String(context.revision));
+      rememberRevision(context.storeId, context.revision);
     }
     setStatus('Tersinkron ke cloud', 'ok');
     return { synced: true };
   })().catch((error) => {
+    const networkError = /tidak dapat terhubung ke server|failed to fetch|networkerror|load failed/i.test(error?.message || '');
+    if (networkError) {
+      setStatus('Offline — perubahan tersimpan di perangkat', 'warn');
+      return { offline: true };
+    }
     setStatus('Sinkronisasi gagal', 'error');
     syncErrorListener(error);
     throw error;
@@ -386,7 +410,7 @@ export async function resolveSyncConflict(choice) {
     await db.markSynced(local.generation);
   }
   pendingConflict = null;
-  localStorage.setItem(syncKey(context.storeId), String(context.revision));
+  rememberRevision(context.storeId, context.revision);
   setStatus('Tersinkron ke cloud', 'ok');
 }
 
@@ -447,7 +471,7 @@ export async function rotateRecoveryCode() {
   if (!rows?.length) throw new Error('Data toko berubah di perangkat lain. Sinkronkan lalu coba lagi.');
   context.recoveryEnvelope = envelope;
   context.revision++;
-  localStorage.setItem(syncKey(context.storeId), String(context.revision));
+  rememberRevision(context.storeId, context.revision);
   return code;
 }
 

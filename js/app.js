@@ -18,19 +18,23 @@ const pct = (x) => (x * 100).toFixed(1).replace('.', ',') + '%';
 
 let activeLoads = 0;
 let loadingTimer;
-function withLoading(task, message = 'Memproses permintaan...') {
-  activeLoads += 1;
-  $('#loading-message').textContent = message;
-  if (activeLoads === 1) {
-    loadingTimer = setTimeout(() => {
-      if (activeLoads) $('#boot-loader').classList.add('is-loading');
-    }, 120);
+function withLoading(task, message = 'Memproses permintaan...', { showLoader = true } = {}) {
+  if (showLoader) {
+    activeLoads += 1;
+    $('#loading-message').textContent = message;
+    if (activeLoads === 1) {
+      loadingTimer = setTimeout(() => {
+        if (activeLoads) $('#boot-loader').classList.add('is-loading');
+      }, 120);
+    }
   }
   return Promise.resolve().then(task).finally(() => {
-    activeLoads -= 1;
-    if (!activeLoads) {
-      clearTimeout(loadingTimer);
-      $('#boot-loader').classList.remove('is-loading');
+    if (showLoader) {
+      activeLoads -= 1;
+      if (!activeLoads) {
+        clearTimeout(loadingTimer);
+        $('#boot-loader').classList.remove('is-loading');
+      }
     }
   });
 }
@@ -287,6 +291,7 @@ function toast(msg, type = 'ok') {
 function openDialog(html) {
   const d = $('#dlg');
   if (d.open) d.close();
+  d.classList.remove('receipt-modal');
   d.innerHTML = html;
   d.querySelectorAll('[data-close]').forEach((b) => (b.onclick = () => d.close()));
   d.showModal();
@@ -626,18 +631,39 @@ function showReceipt(sale) {
     toast(`Pratinjau struk gagal dibuat: ${error.message}`, 'err');
   }
 }
+async function animatePendingQrisRemoval(id) {
+  const row = Array.from(document.querySelectorAll('#pending-qris [data-sale-id]'))
+    .find((item) => item.dataset.saleId === id);
+  if (!row || window.matchMedia('(prefers-reduced-motion: reduce)').matches) return () => {};
+  row.classList.add('qris-pending-exit');
+  await new Promise((resolve) => setTimeout(resolve, 280));
+  return () => row.classList.remove('qris-pending-exit');
+}
+
+function showConfirmedQrisInRecentSales(id) {
+  const row = Array.from(document.querySelectorAll('#recent-sales [data-sale-id]'))
+    .find((item) => item.dataset.saleId === id);
+  if (!row) return;
+  const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  if (!reduceMotion) {
+    row.classList.add('qris-sale-arrival');
+    row.addEventListener('animationend', () => row.classList.remove('qris-sale-arrival'), { once: true });
+  }
+  row.scrollIntoView({ behavior: reduceMotion ? 'auto' : 'smooth', block: 'center' });
+}
+
 function renderPendingQris() {
   const box = $('#pending-qris');
   if (!box) return;
   const pending = S.sales.filter((sale) => sale.metode === 'qris' && sale.statusPembayaran === 'menunggu_konfirmasi');
   box.innerHTML = pending.length
-    ? `<section class="card"><h2>QRIS menunggu konfirmasi (${pending.length})</h2><ul class="rows">${pending.map((sale) => `<li><span>${esc(sale.id)}<small>${fmtDate(sale.waktu)} · ${sale.items.map((item) => esc(item.nama)).join(', ')}</small></span><span class="right"><b>${rp(L.saleTotal(sale))}</b><button class="btn small" data-act="open-receipt" data-id="${esc(sale.id)}">Periksa pembayaran</button></span></li>`).join('')}</ul></section>`
+    ? `<section class="card"><h2>QRIS menunggu konfirmasi (${pending.length})</h2><ul class="rows">${pending.map((sale) => `<li data-sale-id="${esc(sale.id)}"><span>${esc(sale.id)}<small>${fmtDate(sale.waktu)} · ${sale.items.map((item) => esc(item.nama)).join(', ')}</small></span><span class="right"><b>${rp(L.saleTotal(sale))}</b><button class="btn small" data-act="open-receipt" data-id="${esc(sale.id)}">Periksa pembayaran</button></span></li>`).join('')}</ul></section>`
     : '';
 }
 function renderRecentSales() {
   const box = $('#recent-sales');
   if (!box) return;
-  const allSales = [...S.sales].sort((a, b) => b.waktu.localeCompare(a.waktu));
+  const allSales = L.recentSales(S.sales, S.sales.length);
   const sales = allSales.slice(0, S.recentSalesLimit);
   const paymentStatus = (sale) => sale.statusPembayaran === 'menunggu_konfirmasi'
     ? 'Menunggu konfirmasi'
@@ -649,7 +675,7 @@ function renderRecentSales() {
           ? 'Berhasil dibayar'
           : 'Status tidak diketahui';
   box.innerHTML = `<section class="card"><h2>Transaksi terbaru</h2>${sales.length
-    ? `<ul class="rows">${sales.map((sale) => `<li><span>${esc(sale.id)}<small>${fmtDate(sale.waktu)} · ${esc(String(sale.metode || 'tidak diketahui').toUpperCase())} · ${esc(paymentStatus(sale))}</small></span><span class="right"><b>${rp(L.saleTotal(sale))}</b><button class="btn small" data-act="open-receipt" data-id="${esc(sale.id)}">Lihat struk</button></span></li>`).join('')}</ul>${allSales.length > sales.length ? '<button class="btn small" data-act="more-recent-sales">Muat transaksi berikutnya</button>' : ''}`
+    ? `<ul class="rows">${sales.map((sale) => `<li data-sale-id="${esc(sale.id)}"><span>${esc(sale.id)}<small>${fmtDate(sale.waktu)} · ${esc(String(sale.metode || 'tidak diketahui').toUpperCase())} · ${esc(paymentStatus(sale))}</small></span><span class="right"><b>${rp(L.saleTotal(sale))}</b><button class="btn small" data-act="open-receipt" data-id="${esc(sale.id)}">Lihat struk</button></span></li>`).join('')}</ul>${allSales.length > sales.length ? '<button class="btn small" data-act="more-recent-sales">Muat transaksi berikutnya</button>' : ''}`
     : '<p class="muted">Belum ada transaksi yang tercatat.</p>'}</section>`;
 }
 async function previewQrisFile(file) {
@@ -1094,7 +1120,8 @@ function mZakat() {
 /* ============ Menu dan pengaturan ============ */
 function vMenu() {
   const items = [['belanja', 'Belanja barang', 'Catat barang masuk'], ['pengeluaran', 'Pengeluaran', 'Biaya usaha dan uang pribadi'], ['laporan', 'Laporan', 'Laba rugi, grafik, ekspor'], ['zakat', 'Zakat usaha', 'Buka layanan Lazismu'], ['pengaturan', 'Pengaturan', 'Akun, asisten, sinkronisasi, cadangan']];
-  return `<ul class="menu">${items.map(([k, t, s]) => `<li><a href="#/${k}"><b>${t}</b><small>${s}</small></a></li>`).join('')}</ul>`;
+  return `<ul class="menu">${items.map(([k, t, s]) => `<li><a href="#/${k}"><b>${t}</b><small>${s}</small></a></li>`).join('')}</ul>
+    ${OWNER() ? '<section class="card"><h2>Pengelolaan transaksi</h2><p class="muted small">Hapus seluruh riwayat penjualan, belanja barang, pengeluaran, penarikan pribadi, dan kasbon beserta pembayarannya. Produk, pelanggan, pengaturan toko, dan jumlah stok saat ini tetap dipertahankan.</p><button class="btn danger" data-act="clear-transactions">Hapus semua data transaksi</button></section>' : ''}`;
 }
 function vPengaturan() {
   return `  <section class="card"><h2>Akun toko</h2><p><b>${esc(S.account.email)}</b></p><p class="muted small">Peran: ${OWNER() ? 'Pemilik' : 'Asisten'} · Nama toko: ${esc(S.account.storeName)}</p>
@@ -1140,12 +1167,19 @@ const A = {
     if (!sale || sale.metode !== 'qris' || sale.statusPembayaran !== 'menunggu_konfirmasi') {
       return toast('Transaksi QRIS tidak lagi menunggu konfirmasi.', 'err');
     }
-    if (!(await confirmModal('Konfirmasi pembayaran QRIS?', 'Pembayaran diterima', 'Pastikan nominal dan penerimaan pembayaran cocok pada aplikasi atau mutasi akun Anda. Tindakan ini hanya mencatat verifikasi manual.'))) return;
+    const dialog = $('#dlg');
+    if (dialog.open) dialog.close();
+    const restorePendingRow = await animatePendingQrisRemoval(sale.id);
     const updated = { ...sale, statusPembayaran: 'berhasil', dibayarPada: new Date().toISOString(), diverifikasiOleh: S.account.email };
-    await db.put('sales', updated);
-    await load();
+    try {
+      await db.put('sales', updated);
+    } catch (error) {
+      restorePendingRow();
+      throw error;
+    }
+    S.sales = S.sales.map((item) => item.id === updated.id ? updated : item);
     render();
-    showReceipt(updated);
+    showConfirmedQrisInRecentSales(updated.id);
     toast('Pembayaran QRIS dikonfirmasi secara manual.');
   },
   'cancel-qris': async (d) => {
@@ -1342,6 +1376,17 @@ const A = {
     if (!(await confirmModal('Hapus semua data toko?', 'Hapus semua', 'Produk, transaksi, kasbon, dan pengaturan toko akan dihapus dari server dan perangkat.'))) return;
     await db.wipe(); await setCfg('toko', S.account.storeName); S.cart = []; toast('Semua data dihapus.'); await refresh();
   },
+  'clear-transactions': async () => {
+    if (!(await confirmModal(
+      'Hapus semua data transaksi?',
+      'Hapus transaksi',
+      'Riwayat penjualan, belanja barang, pengeluaran, penarikan pribadi, kasbon, dan pembayarannya akan dihapus. Produk, pelanggan, pengaturan toko, serta jumlah stok saat ini tidak berubah. Tindakan ini tidak dapat dibatalkan.',
+    ))) return;
+    await db.clearTransactions();
+    S.cart = [];
+    await refresh();
+    toast('Semua data transaksi telah dihapus. Produk dan jumlah stok tetap dipertahankan.');
+  },
   'copy-recovery': async () => {
     await navigator.clipboard.writeText(S.recoveryCode);
     toast('Kunci pemulihan disalin ke papan klip.');
@@ -1356,7 +1401,7 @@ const OWNER_ONLY_ACTIONS = new Set([
   'addprod', 'editprod', 'delprod', 'addpurchase', 'addexp', 'addwd', 'delmoney',
   'manualdebt', 'csv', 'xlsx', 'print', 'saveprofile',
   'save-qris', 'delete-qris', 'transfer-account', 'delete-transfer-account', 'manage-assistants', 'remove-assistant',
-  'rotate-recovery', 'backup', 'demo', 'reset',
+  'rotate-recovery', 'backup', 'demo', 'reset', 'clear-transactions',
 ]);
 
 document.addEventListener('click', (e) => {
@@ -1369,7 +1414,7 @@ document.addEventListener('click', (e) => {
   const message = el.dataset.act === 'offline-unlock' ? 'Sedang membuka data offline...'
     : el.dataset.act === 'logout' ? 'Sedang keluar...'
       : 'Sedang memproses...';
-  withLoading(() => A[el.dataset.act](el.dataset, el), message)
+  withLoading(() => A[el.dataset.act](el.dataset, el), message, { showLoader: el.dataset.act !== 'confirm-qris' })
     .catch((err) => { console.error(err); toast('Terjadi kesalahan: ' + err.message, 'err'); });
 });
 document.addEventListener('submit', (e) => {
@@ -1482,7 +1527,20 @@ addEventListener('online', netStatus); addEventListener('offline', netStatus);
       renderAuth('');
     }
     netStatus();
-    if ('serviceWorker' in navigator) navigator.serviceWorker.register('./sw.js').catch(() => {});
+    if ('serviceWorker' in navigator) {
+      try {
+        const registration = await navigator.serviceWorker.register('./sw.js', { updateViaCache: 'none' });
+        const reloadMarker = 'warungpintar:controller-reload';
+        if (sessionStorage.getItem(reloadMarker)) sessionStorage.removeItem(reloadMarker);
+        else navigator.serviceWorker.addEventListener('controllerchange', () => {
+          sessionStorage.setItem(reloadMarker, '1');
+          location.reload();
+        }, { once: true });
+        await registration.update();
+      } catch (error) {
+        console.error('PWA cache update check failed', error);
+      }
+    }
   } catch (err) {
     console.error(err);
     netStatus();

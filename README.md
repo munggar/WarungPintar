@@ -183,7 +183,7 @@ Pengujian tersebut mencakup logika bisnis, struktur XLSX, enkripsi, pemulihan ka
 7. **Laporan:** pilih periode untuk melihat ringkasan laba rugi, grafik omzet, dan daftar barang terjual beserta jumlah, omzet, serta laba kotor. Ekspor CSV dan XLSX mencakup transaksi pada periode yang dipilih.
 8. **Zakat Usaha:** pilih **Buka Zakat Perusahaan Lazismu** untuk membuka [layanan Zakat Perusahaan Lazismu](https://donasi.lazismu.org/zakatperusahaan). Perhitungan dan pembayaran berlangsung di situs Lazismu. Aplikasi tidak mengirim data atau menerima konfirmasi pembayaran.
 9. **Struk transaksi:** unduh PDF/JPG atau bagikan melalui fitur Web Share jika didukung browser. Jika berbagi berkas tidak didukung, unduh berkas lalu lampirkan secara manual.
-10. **Pengaturan:** kelola asisten, simpan kunci pemulihan, sinkronkan data, serta unduh atau pulihkan cadangan terenkripsi.
+10. **Menu dan Pengaturan:** pemilik dapat menghapus riwayat penjualan, pembelian, pengeluaran, penarikan pribadi, dan kasbon beserta pembayarannya melalui Menu. Data produk, pelanggan, pengaturan toko, serta jumlah stok tidak berubah. Pengaturan juga menyediakan pengelolaan asisten, kunci pemulihan, sinkronisasi, dan cadangan terenkripsi.
 
 ## Perhitungan Bisnis
 

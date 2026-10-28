@@ -21,6 +21,9 @@ export const saleTotal = (s) => sum(s.items.map((i) => i.hargaJual * i.qty));
 // Memakai harga beli SAAT transaksi, sehingga laba historis tetap akurat
 export const saleCost = (s) => sum(s.items.map((i) => i.hargaBeliSaatItu * i.qty));
 export const saleCountsAsRevenue = (sale) => !sale.statusPembayaran || ['berhasil', 'kasbon'].includes(sale.statusPembayaran);
+export const recentSales = (sales, limit = 20) => [...sales]
+  .sort((a, b) => (b.dibayarPada || b.waktu).localeCompare(a.dibayarPada || a.waktu))
+  .slice(0, limit);
 
 export function csvCell(value) {
   let text = String(value ?? '');
