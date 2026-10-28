@@ -119,6 +119,7 @@ npx supabase secrets set APP_URL="http://localhost:8080"
 npx supabase functions deploy register-owner
 npx supabase functions deploy invite-assistant
 npx supabase functions deploy assistant-access
+npx supabase functions deploy reset-password
 ```
 
 `APP_URL` harus sama dengan origin aplikasi yang diizinkan pada Authentication → URL Configuration. Saat aplikasi di-hosting, gunakan origin HTTPS. Untuk pengembangan lokal, fungsi juga menerima `http://localhost` dan `http://127.0.0.1` pada port apa pun.
@@ -153,9 +154,11 @@ Jika muncul pesan `Failed to fetch`, pastikan fungsi telah diterapkan pada proye
 
 Simpan kunci pemulihan saat ditampilkan. Kunci tersebut tidak disimpan di server. Jika dibutuhkan oleh asisten, bagikan melalui saluran komunikasi yang aman.
 
+Pemulihan kata sandi dilakukan pada formulir **Lupa kata sandi** tanpa tautan email: masukkan email akun, kunci pemulihan, dan kata sandi baru. Edge Function `reset-password` harus dideploy agar fitur dapat memverifikasi kunci pemulihan dan memperbarui kata sandi melalui Supabase Admin API.
+
 **Catatan akun dan data awal:** pendaftaran akun autentikasi dan pembuatan tabel merupakan proses yang berbeda. Periksa akun melalui Supabase Dashboard → **Authentication → Users**, bukan Table Editor. Jika alamat email sudah terdaftar, gunakan akun yang ada atau hapus akun melalui Dashboard sebelum mendaftar kembali. Setelah migrasi dijalankan, pengisian awal akan membuat toko dan keanggotaan pemilik untuk akun autentikasi yang sudah ada.
 
-Toko baru dimulai tanpa data. Data lokal dari akun lain tidak disalin secara otomatis. Data contoh hanya dimuat jika pengguna memilih **Muat data contoh** di menu Pengaturan.
+Toko baru dimulai tanpa produk dan transaksi. Data lokal dari akun lain tidak disalin secara otomatis. Semua produk harus ditambahkan melalui halaman **Tambah Produk**.
 
 ### Mencoba dari ponsel
 
@@ -214,8 +217,7 @@ warungpintar/
 │   ├── barcode-scanner-entry.js     # Berkas awal bundle ZXing
 │   ├── barcode-scanner.js           # Bundle pemindai barcode hasil npm run build
 │   ├── logic.js                     # Logika bisnis murni
-│   ├── db.js                        # Penyimpanan IndexedDB terenkripsi
-│   └── seed.js                      # Data contoh
+│   └── db.js                        # Penyimpanan IndexedDB terenkripsi
 ├── supabase/
 │   ├── migrations/                  # Skema, trigger, dan kebijakan RLS
 │   └── functions/                   # Edge Functions untuk pendaftaran dan asisten

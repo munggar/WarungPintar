@@ -1,7 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import * as L from '../js/logic.js';
-import { buildSeed } from '../js/seed.js';
 
 const NOW = new Date('2025-10-20T15:00:00');
 const sale = (waktu, items, extra = {}) => ({ id: Math.random() + '', waktu: new Date(waktu).toISOString(), items, metode: 'tunai', ...extra });
@@ -172,7 +171,12 @@ test('nomor WhatsApp dinormalisasi ke format 62', () => {
 test('skor kesehatan usaha 0-100 dan butuh data', () => {
   const empty = L.healthScore({ sales: [], expenses: [], withdrawals: [], products: [], debts: [], payments: [] }, NOW);
   assert.equal(empty.cukupData, false);
-  const h = L.healthScore(buildSeed(NOW), NOW);
+  const populated = {
+    products: [{ id: 'produk-1', nama: 'Produk', stok: 10, hargaBeli: 8000, hargaJual: 10000 }],
+    sales: [{ id: 'penjualan-1', waktu: new Date(NOW.getTime() - 86400000).toISOString(), metode: 'tunai', items: [item('produk-1', 1, 10000, 8000)] }],
+    expenses: [], withdrawals: [], debts: [], payments: [],
+  };
+  const h = L.healthScore(populated, NOW);
   assert.equal(h.cukupData, true);
   assert.ok(h.skor >= 0 && h.skor <= 100);
 });
@@ -230,13 +234,4 @@ test('CSV meloloskan tanda kutip dan menetralkan sel formula', () => {
   assert.equal(L.csvCell('=HYPERLINK("https://example.invalid")'), `"'=HYPERLINK(""https://example.invalid"")"`);
   assert.equal(L.csvCell('  -SUM(A1:A2)'), '"\'  -SUM(A1:A2)"');
   assert.equal(L.csvCell(-50), '"-50"');
-});
-
-test('data contoh konsisten: kasbon = total penjualan dan punya pelanggan', () => {
-  const d = buildSeed(NOW);
-  for (const debt of d.debts) {
-    const s = d.sales.find((x) => x.id === debt.saleId);
-    assert.ok(s); assert.equal(debt.jumlah, L.saleTotal(s));
-    assert.ok(d.customers.find((c) => c.id === debt.customerId));
-  }
 });

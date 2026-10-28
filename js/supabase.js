@@ -38,6 +38,9 @@ async function request(path, options = {}, retry = true) {
     if (path === '/functions/v1/register-owner' && error instanceof TypeError) {
       throw new Error('Tidak dapat menghubungi fungsi pendaftaran. Deploy register-owner ke project Supabase dengan `npx supabase functions deploy register-owner`, lalu coba lagi.');
     }
+    if (path === '/functions/v1/reset-password' && error instanceof TypeError) {
+      throw new Error('Fungsi reset-password belum dapat dihubungi. Deploy reset-password ke project Supabase yang sama dengan konfigurasi aplikasi, lalu coba lagi.');
+    }
     const isNetworkFailure = error instanceof TypeError
       || /failed to fetch|networkerror|load failed/i.test(error?.message || '');
     if (isNetworkFailure) throw new Error('Tidak dapat terhubung ke server. Periksa koneksi internet lalu coba lagi.');
@@ -154,11 +157,12 @@ export async function updatePassword(password) {
   return result;
 }
 
-export async function sendPasswordReset(email) {
-  await request('/auth/v1/recover', {
+export async function resetPassword(email, recoveryCode, password) {
+  const { result } = await request('/functions/v1/reset-password', {
     method: 'POST',
-    body: JSON.stringify({ email, redirect_to: location.origin + location.pathname }),
-  }, false);
+    body: JSON.stringify({ email, recoveryCode, password }),
+  });
+  return result;
 }
 
 export async function logout() {

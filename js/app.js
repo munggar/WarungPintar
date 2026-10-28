@@ -1,6 +1,5 @@
 import * as db from './db.js';
 import * as L from './logic.js';
-import { buildSeed } from './seed.js';
 import { createXlsx } from './xlsx.js';
 import { decryptBackup, encryptBackup } from './crypto.js';
 import * as supabase from './supabase.js';
@@ -255,13 +254,22 @@ async function submitAuth(form) {
 async function beginPasswordReset() {
   const value = await formModal({
     title: 'Atur ulang kata sandi',
-    note: 'Tautan pengaturan ulang akan dikirim ke email akun. Kunci pemulihan diperlukan untuk membuka data terenkripsi setelah kata sandi diubah.',
-    fields: [{ name: 'email', label: 'Email akun', type: 'email', required: true }],
-    submit: 'Kirim tautan pengaturan ulang',
+    note: 'Verifikasi dilakukan dengan kunci pemulihan. Tidak ada tautan atau verifikasi email.',
+    fields: [
+      { name: 'email', label: 'Email akun', type: 'email', required: true },
+      { name: 'recovery', label: 'Kunci pemulihan', required: true, autocomplete: 'off' },
+      { name: 'password', label: 'Kata sandi baru', type: 'password', required: true, minlength: 8 },
+      { name: 'confirmPassword', label: 'Ulangi kata sandi baru', type: 'password', required: true, minlength: 8 },
+    ],
+    submit: 'Reset kata sandi',
   });
   if (!value) return;
-  await supabase.sendPasswordReset(value.email.trim().toLowerCase());
-  toast('Tautan pengaturan ulang kata sandi telah dikirim. Kunci pemulihan diperlukan untuk membuka data terenkripsi.');
+  if (value.password !== value.confirmPassword) throw new Error('Kata sandi baru belum sama.');
+  await supabase.resetPassword(value.email.trim().toLowerCase(), value.recovery.trim(), value.password);
+  await supabase.login(value.email.trim().toLowerCase(), value.password);
+  S.authEmail = value.email.trim().toLowerCase();
+  await completeLogin(value.password, value.recovery.trim());
+  toast('Kata sandi berhasil direset.');
 }
 
 function toast(msg, type = 'ok') {
@@ -405,7 +413,8 @@ function render() {
   r.mount && r.mount();
   const nav = OWNER() ? NAV : NAV.filter((n) => ASISTEN_OK.includes(n[0]));
   const active = ['belanja', 'pengeluaran', 'laporan', 'zakat', 'pengaturan'].includes(name) ? 'menu' : name;
-  $('#nav').innerHTML = nav.map(([k, l, ic]) => `<a href="#/${k}" class="${k === active ? 'on' : ''}" ${k === active ? 'aria-current="page"' : ''}><span aria-hidden="true">${ic}</span>${l}</a>`).join('');
+  $('#nav').dataset.count = String(nav.length);
+  $('#nav').innerHTML = nav.map(([k, l, ic]) => `<a href="#/${k}" class="${k === active ? 'on' : ''}" ${k === active ? 'aria-current="page"' : ''} title="${esc(l)}"><span aria-hidden="true">${ic}</span><span class="nav-label">${esc(l)}</span></a>`).join('');
   window.scrollTo(0, 0);
 }
 async function refresh() { await load(); render(); }
@@ -418,7 +427,7 @@ function vBeranda() {
   const month = L.summarize(S, new Date(now.getFullYear(), now.getMonth(), 1), L.endOfDay(now));
   const piutang = L.totalReceivable(S.debts, S.payments);
   if (!S.products.length) {
-    return `<section class="nota"><h2>Mulai dengan menambahkan produk</h2><p>Tambahkan produk, lalu catat penjualan melalui menu Kasir. Ringkasan laba rugi akan diperbarui secara otomatis.</p><div class="row"><a class="btn primary" href="#/produk">Tambah produk</a><button class="btn" data-act="demo">Lihat data contoh</button></div></section>`;
+    return `<section class="nota"><h2>Mulai dengan menambahkan produk</h2><p>Tambahkan produk, lalu catat penjualan melalui menu Kasir. Ringkasan laba rugi akan diperbarui secara otomatis.</p><div class="row"><a class="btn primary" href="#/produk">Tambah produk</a></div></section>`;
   }
   const hs = L.healthScore(S, now);
   const low = L.lowStock(S.products, S.sales, now, Number(S.cfg.leadDays || 2));
@@ -1142,7 +1151,7 @@ function vPengaturan() {
   <section class="card"><h2>Sinkronisasi</h2><p class="muted small">Perubahan dienkripsi sebelum dikirim. Saat offline, data tetap tersimpan dalam keadaan terenkripsi di perangkat dan akan disinkronkan saat koneksi tersedia.</p><button class="btn" data-act="sync">Sinkronkan sekarang</button></section>
   <section class="card"><h2>Cadangan terenkripsi</h2><p class="muted small">Berkas cadangan tidak memuat data dalam bentuk terbuka. Gunakan kata sandi akun untuk mengenkripsi dan memulihkan cadangan.</p>
     <div class="row wrap"><button class="btn primary" data-act="backup">Unduh cadangan</button><label class="btn">Pulihkan cadangan<input id="restore" type="file" accept="application/json,.json" hidden></label></div></section>
-  ${OWNER() ? `<section class="card"><h2>Data contoh dan penghapusan data</h2><div class="row wrap"><button class="btn" data-act="demo">Muat data contoh</button><button class="btn danger" data-act="reset">Hapus semua data toko</button></div></section>` : ''}
+  ${OWNER() ? `<section class="card"><h2>Penghapusan data</h2><div class="row wrap"><button class="btn danger" data-act="reset">Hapus semua data toko</button></div></section>` : ''}
   <section class="card"><button class="btn danger" data-act="logout">Keluar dari akun</button></section>
   <p class="muted small center">WarungPintar 2.0 · Data dienkripsi dengan AES-GCM dan kunci akun</p>`;
 }
@@ -1368,10 +1377,6 @@ const A = {
     downloadFile(`warungpintar-cadangan-${L.ymd(new Date())}.json`, 'application/json', JSON.stringify(backup));
     toast('Cadangan terenkripsi diunduh.');
   },
-  demo: async () => {
-    if ((S.products.length || S.sales.length) && !(await confirmModal('Ganti semua data dengan data contoh?', 'Ganti data', 'Data Anda saat ini akan dihapus. Unduh cadangan dulu bila perlu.'))) return;
-    await db.importAll({ app: 'WarungPintar', ...buildSeed(new Date()) }); toast('Data contoh dimuat.'); await refresh();
-  },
   reset: async () => {
     if (!(await confirmModal('Hapus semua data toko?', 'Hapus semua', 'Produk, transaksi, kasbon, dan pengaturan toko akan dihapus dari server dan perangkat.'))) return;
     await db.wipe(); await setCfg('toko', S.account.storeName); S.cart = []; toast('Semua data dihapus.'); await refresh();
@@ -1401,7 +1406,7 @@ const OWNER_ONLY_ACTIONS = new Set([
   'addprod', 'editprod', 'delprod', 'addpurchase', 'addexp', 'addwd', 'delmoney',
   'manualdebt', 'csv', 'xlsx', 'print', 'saveprofile',
   'save-qris', 'delete-qris', 'transfer-account', 'delete-transfer-account', 'manage-assistants', 'remove-assistant',
-  'rotate-recovery', 'backup', 'demo', 'reset', 'clear-transactions',
+  'rotate-recovery', 'backup', 'reset', 'clear-transactions',
 ]);
 
 document.addEventListener('click', (e) => {

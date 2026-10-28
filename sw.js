@@ -1,8 +1,8 @@
 // Service worker: menyimpan berkas aplikasi agar bisa dibuka tanpa internet.
 // Naikkan VERSI setiap kali berkas aplikasi diubah agar cache diperbarui.
-const VERSI = 'warungpintar-v31';
+const VERSI = 'warungpintar-v35';
 const BERKAS = ['./', './index.html', './css/style.css', './js/app.js', './js/db.js', './js/logic.js', './js/receipt.js',
-  './js/seed.js', './js/xlsx.js', './js/config.js', './js/crypto.js', './js/supabase.js', './js/cloud-sync.js',
+  './js/xlsx.js', './js/config.js', './js/crypto.js', './js/supabase.js', './js/cloud-sync.js',
   './manifest.webmanifest', './icons/icon.svg', './icons/icon-192.png', './icons/icon-512.png'];
 
 self.addEventListener('install', (e) => {
