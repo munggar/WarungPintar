@@ -223,9 +223,18 @@ ul { margin: 0; padding: 0; list-style: none; }
 
 /* Dialog */
 dialog { border: 0; border-radius: 12px; padding: 0; width: min(94vw, 460px); max-height: 92vh; overflow-y: auto; color: var(--tinta); }
+dialog.form-dialog-open { max-height: 92dvh; overflow: hidden; }
 dialog.receipt-modal { overflow: hidden; }
 dialog::backdrop { background: rgba(23,32,51,.55); }
 .dlg-body { padding: 18px; }
+.form-dialog { display: flex; flex-direction: column; max-height: min(92vh, 680px); overflow: hidden; }
+.form-dialog-heading, .form-dialog-actions { flex: 0 0 auto; }
+.form-dialog-heading { padding-bottom: 4px; }
+.form-dialog-heading .muted { margin-top: 6px; }
+.form-dialog-fields { min-height: 0; flex: 1 1 auto; overflow-y: auto; overscroll-behavior: contain; }
+.form-dialog > .err { flex: 0 0 auto; }
+.form-dialog-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin-top: 8px; padding-top: 8px; background: var(--putih); }
+.form-dialog-actions > .btn { width: 100%; min-width: 0; padding: 6px 8px; }
 .struk { background: #fffdf2; border: 1px dashed var(--abu); padding: 12px; font: .9rem/1.45 ui-monospace, Menlo, Consolas, monospace; white-space: pre-wrap; }
 
 /* Toast */
@@ -276,6 +285,8 @@ dialog::backdrop { background: rgba(23,32,51,.55); }
   .nota::before { left: 27px; }
   .angka { font-size: 2.1rem; overflow-wrap: anywhere; }
   dialog { width: min(96vw, 460px); max-height: 94vh; }
+  dialog.form-dialog-open { max-height: 94dvh; }
+  .form-dialog { max-height: min(94vh, 720px); max-height: min(94dvh, 720px); padding: 14px; }
   .receipt-dialog { max-height: 94vh; padding: 16px; }
   .receipt-actions { gap: 7px; }
   .receipt-actions > .btn { min-height: 46px; padding: 7px 8px; font-size: .92rem; }

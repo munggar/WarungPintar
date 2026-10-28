@@ -318,7 +318,13 @@ function fieldHtml(f) {
 // Menampilkan formulir modal. Mengembalikan objek nilai, atau null jika dibatalkan.
 function formModal({ title, fields = [], submit = 'Simpan', note = '', validate }) {
   return new Promise((resolve) => {
-    const d = openDialog(`<form class="dlg-body" novalidate><h2>${esc(title)}</h2>${note ? `<p class="muted">${esc(note)}</p>` : ''}${fields.map(fieldHtml).join('')}<p class="err" id="dlg-err" role="alert"></p><div class="row end"><button type="button" class="btn ghost" data-close>Batal</button><button class="btn primary">${esc(submit)}</button></div></form>`);
+    const d = openDialog(`<form class="dlg-body form-dialog" novalidate>
+      <header class="form-dialog-heading"><h2>${esc(title)}</h2>${note ? `<p class="muted">${esc(note)}</p>` : ''}</header>
+      <div class="form-dialog-fields">${fields.map(fieldHtml).join('')}</div>
+      <p class="err" id="dlg-err" role="alert"></p>
+      <div class="row end form-dialog-actions"><button type="button" class="btn ghost" data-close>Batal</button><button class="btn primary">${esc(submit)}</button></div>
+    </form>`);
+    d.classList.add('form-dialog-open');
     let done = false;
     const finish = (v) => { if (done) return; done = true; if (d.open) d.close(); resolve(v); };
     const form = $('form', d);
@@ -353,7 +359,10 @@ function formModal({ title, fields = [], submit = 'Simpan', note = '', validate 
       if (msg) return fail(msg);
       finish(vals);
     };
-    d.addEventListener('close', () => finish(null), { once: true });
+    d.addEventListener('close', () => {
+      d.classList.remove('form-dialog-open');
+      finish(null);
+    }, { once: true });
     d.oncancel = () => finish(null);
     (form.querySelector('input:not([type=checkbox]),select,textarea') || form.querySelector('button.primary')).focus();
   });
