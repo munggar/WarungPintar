@@ -545,7 +545,7 @@ async function checkout() {
     if (S.metode === 'qris') {
       const accepted = await confirmModal(
         'Simpan transaksi QRIS?',
-        'Simpan sebagai menunggu pembayaran',
+        'Simpan',
         'Transaksi belum dianggap lunas. Setelah pelanggan membayar, kasir perlu mencocokkan pembayaran dan mengonfirmasikannya secara manual.',
       );
       if (!accepted) return;
@@ -599,11 +599,12 @@ function showReceipt(sale) {
     ? `<section class="qris-payment"><h3>Pembayaran QRIS — ${rp(L.saleTotal(sale))}</h3><img class="qris-preview" src="${esc(S.cfg.qrisImage)}" alt="QRIS toko untuk transaksi ${esc(sale.id)}"><p>Pelanggan memindai QR ini dan membayar ${rp(L.saleTotal(sale))}. Konfirmasi hanya setelah pembayaran cocok pada aplikasi atau mutasi akun Anda.</p><span class="chip warn">Menunggu konfirmasi manual</span></section>`
     : '';
   const controls = pending
-    ? `<button class="btn primary receipt-confirm" data-act="confirm-qris" data-id="${esc(sale.id)}">Konfirmasi pembayaran diterima</button><button class="btn danger" data-act="cancel-qris" data-id="${esc(sale.id)}">Batalkan transaksi</button>`
+    ? `<button class="btn primary receipt-confirm" type="button" data-act="confirm-qris" data-id="${esc(sale.id)}">Simpan</button><button class="btn danger" type="button" data-act="cancel-qris" data-id="${esc(sale.id)}">Batal</button>`
     : '';
-  const d = openDialog(`<div class="dlg-body receipt-dialog"><button class="dialog-close no-print" type="button" data-close aria-label="Tutup modal" title="Tutup">×</button><h2>${pending ? 'Menunggu pembayaran QRIS' : 'Transaksi tersimpan'}</h2>
+  const otherControls = pending ? '' : `<button class="btn" data-act="receipt-pdf" data-id="${esc(sale.id)}">Unduh PDF</button><button class="btn" data-act="receipt-jpg" data-id="${esc(sale.id)}">Unduh JPG</button><button class="btn primary" data-act="share-receipt" data-id="${esc(sale.id)}" data-format="pdf">Bagikan PDF</button><button class="btn" data-act="share-receipt" data-id="${esc(sale.id)}" data-format="jpg">Bagikan JPG</button><button class="btn" data-act="print-receipt">Cetak</button><a class="btn" href="${L.waLink(cust ? cust.wa : '', text)}" target="_blank" rel="noopener noreferrer">Buka WhatsApp (lampirkan manual)</a>`;
+  const d = openDialog(`<div class="dlg-body receipt-dialog">${pending ? '' : '<button class="dialog-close no-print" type="button" data-close aria-label="Tutup modal" title="Tutup">×</button>'}<h2>${pending ? 'Menunggu pembayaran QRIS' : 'Transaksi tersimpan'}</h2>
     ${qris}<article class="receipt-paper" id="receipt-paper"><pre class="struk visually-hidden">${esc(text.replace(/\*/g, ''))}</pre></article>
-    <div class="receipt-actions no-print">${controls}<button class="btn" data-act="receipt-pdf" data-id="${esc(sale.id)}">Unduh PDF</button><button class="btn" data-act="receipt-jpg" data-id="${esc(sale.id)}">Unduh JPG</button><button class="btn primary" data-act="share-receipt" data-id="${esc(sale.id)}" data-format="pdf">Bagikan PDF</button><button class="btn" data-act="share-receipt" data-id="${esc(sale.id)}" data-format="jpg">Bagikan JPG</button><button class="btn" data-act="print-receipt">Cetak</button><a class="btn" href="${L.waLink(cust ? cust.wa : '', text)}" target="_blank" rel="noopener noreferrer">Buka WhatsApp (lampirkan manual)</a></div><p class="muted small no-print">WhatsApp tidak otomatis menerima file dari tautan pesan. Jika berbagi file tidak tersedia, unduh file, buka WhatsApp, lalu lampirkan secara manual.</p></div>`);
+    <div class="receipt-actions no-print">${controls}${otherControls}</div>${pending ? '' : '<p class="muted small no-print">WhatsApp tidak otomatis menerima file dari tautan pesan. Jika berbagi file tidak tersedia, unduh file, buka WhatsApp, lalu lampirkan secara manual.</p>'}</div>`);
   d.classList.add('receipt-modal');
   d.addEventListener('click', (event) => {
     if (event.target === d) d.close();
@@ -909,13 +910,24 @@ function repRange() {
   return [from, to];
 }
 function barChart(series) {
-  const W = 600, H = 170, pad = 8, max = Math.max(...series.map((s) => s.omzet), 1);
-  const bw = (W - pad * 2) / series.length;
-  const bars = series.map((s, i) => {
-    const h = (s.omzet / max) * (H - 34);
-    return `<rect x="${(pad + i * bw + bw * 0.15).toFixed(1)}" y="${(H - 18 - h).toFixed(1)}" width="${(bw * 0.7).toFixed(1)}" height="${h.toFixed(1)}" rx="2"><title>${s.date}: ${rp(s.omzet)}</title></rect>`;
+  const W = 720, H = 220, left = 72, right = 18, top = 24, bottom = 38;
+  const plotW = W - left - right, plotH = H - top - bottom;
+  const max = Math.max(...series.map((s) => s.omzet), 1);
+  const step = series.length > 1 ? plotW / series.length : plotW;
+  const labelStep = Math.max(1, Math.ceil(series.length / (window.innerWidth < 520 ? 5 : 8)));
+  const grid = [0, .25, .5, .75, 1].map((level) => {
+    const y = top + plotH * (1 - level);
+    return `<line x1="${left}" y1="${y}" x2="${W - right}" y2="${y}" class="chart-grid"/><text x="${left - 8}" y="${y + 4}" text-anchor="end" class="chart-axis">${level ? rp(max * level).replace(',00', '') : '0'}</text>`;
   }).join('');
-  return `<svg viewBox="0 0 ${W} ${H}" class="chart" role="img" aria-label="Grafik omzet harian">${bars}<text x="${pad}" y="${H - 3}">${series[0].date.slice(5)}</text><text x="${W - pad}" y="${H - 3}" text-anchor="end">${series[series.length - 1].date.slice(5)}</text><text x="${pad}" y="12">Tertinggi ${rp(max)}</text></svg>`;
+  const bars = series.map((s, i) => {
+    const h = s.omzet / max * plotH;
+    const x = left + i * step + Math.min(step * .18, 6);
+    const width = Math.max(3, step * .64);
+    return `<rect x="${x.toFixed(1)}" y="${(top + plotH - h).toFixed(1)}" width="${width.toFixed(1)}" height="${h.toFixed(1)}" rx="3"><title>${fmtDate(s.date)}: ${rp(s.omzet)}</title></rect>`;
+  }).join('');
+  const labels = series.map((s, i) => i % labelStep === 0 || i === series.length - 1
+    ? `<text x="${(left + i * step + step / 2).toFixed(1)}" y="${H - 10}" text-anchor="middle" class="chart-label">${s.date.slice(5)}</text>` : '').join('');
+  return `<div class="chart-wrap"><svg viewBox="0 0 ${W} ${H}" class="chart" role="img" aria-label="Grafik omzet harian"><g>${grid}${bars}${labels}</g></svg></div>`;
 }
 function vLaporan() {
   const [from, to] = repRange();
@@ -926,14 +938,17 @@ function vLaporan() {
   S.expenses.filter((e) => L.inRange(e.waktu, from, to)).forEach((e) => (byKat[e.kategori] = (byKat[e.kategori] || 0) + e.jumlah));
   const P = [['hari', 'Hari ini'], ['7', '7 hari terakhir'], ['30', '30 hari terakhir'], ['bulan', 'Bulan ini'], ['lalu', 'Bulan lalu'], ['kustom', 'Pilih tanggal']];
   const r = (l, v, cls = '') => `<tr class="${cls}"><td>${l}</td><td class="num">${v}</td></tr>`;
-  return `<section class="card no-print"><label class="field"><span>Periode</span><select id="rp">${P.map(([v, l]) => `<option value="${v}"${S.rep.preset === v ? ' selected' : ''}>${l}</option>`).join('')}</select></label>
-    ${S.rep.preset === 'kustom' ? `<div class="row"><label class="field"><span>Dari</span><input id="rf" type="date" value="${S.rep.from}"></label><label class="field"><span>Sampai</span><input id="rt" type="date" value="${S.rep.to}"></label></div>` : ''}</section>
-  <section class="card"><h2>Laba rugi</h2><p class="muted small">${fmtDate(from)} hingga ${fmtDate(to)} · ${esc(S.cfg.toko || 'WarungPintar')}</p>
+  const printRows = sold.map((item, index) => `<tr><td>${index + 1}</td><td>${esc(item.nama)}</td><td class="num">${item.qty}</td><td class="num">${rp(item.omzet / item.qty)}</td><td class="num">${rp(item.omzet)}</td></tr>`).join('');
+  const printTotal = sold.reduce((sum, item) => sum + item.omzet, 0);
+  return `<section class="report-page"><section class="card no-print report-filter"><label class="field"><span>Periode</span><select id="rp">${P.map(([v, l]) => `<option value="${v}"${S.rep.preset === v ? ' selected' : ''}>${l}</option>`).join('')}</select></label>
+    ${S.rep.preset === 'kustom' ? `<div class="row report-date-range"><label class="field"><span>Dari</span><input id="rf" type="date" value="${S.rep.from}"></label><label class="field"><span>Sampai</span><input id="rt" type="date" value="${S.rep.to}"></label></div>` : ''}</section>
+  <section class="card report-profit"><h2>Laba rugi</h2><p class="muted small">${fmtDate(from)} hingga ${fmtDate(to)} · ${esc(S.cfg.toko || 'WarungPintar')}</p>
     <table class="tbl">${r('Omzet penjualan', rp(s.omzet))}${r('Harga pokok penjualan', '−' + rp(s.hpp))}${r('<b>Laba kotor</b>', '<b>' + rp(s.labaKotor) + '</b>', 'sub')}${r('Pengeluaran usaha', '−' + rp(s.pengeluaran))}${r('<b>Laba bersih</b>', '<b class="' + (s.labaBersih < 0 ? 'neg' : 'pos') + '">' + rp(s.labaBersih) + '</b>', 'sub')}${r('Margin bersih', s.omzet ? pct(s.labaBersih / s.omzet) : '-')}${r('Jumlah transaksi', s.transaksi)}${r('Penarikan pribadi (tidak dihitung sebagai biaya)', rp(s.prive))}${r('Sisa piutang kasbon', rp(L.totalReceivable(S.debts, S.payments)))}</table></section>
-  <section class="card"><h2>Omzet harian</h2>${series.length > 62 ? '<p class="muted">Periode terlalu panjang untuk grafik harian. Pilih periode maksimal 2 bulan.</p>' : s.omzet ? barChart(series) : '<p class="muted">Belum ada penjualan pada periode ini.</p>'}</section>
-  <section class="card"><h2>Barang terjual (${sold.length} jenis)</h2>${sold.length ? `<div class="table-wrap"><table class="tbl"><thead><tr><th>Nama produk</th><th class="num">Jumlah terjual</th><th class="num">Omzet</th><th class="num">Laba kotor</th></tr></thead><tbody>${sold.map((item) => `<tr><td>${esc(item.nama)}</td><td class="num">${item.qty}</td><td class="num">${rp(item.omzet)}</td><td class="num">${rp(item.laba)}</td></tr>`).join('')}</tbody></table></div>` : '<p class="muted">Belum ada produk yang terjual pada periode ini.</p>'}</section>
+  <section class="card report-chart"><h2>Omzet harian</h2>${series.length > 62 ? '<p class="muted">Periode terlalu panjang untuk grafik harian. Pilih periode maksimal 2 bulan.</p>' : s.omzet ? barChart(series) : '<p class="muted">Belum ada penjualan pada periode ini.</p>'}</section>
+  <section class="card report-sold"><h2>Barang terjual (${sold.length} jenis)</h2>${sold.length ? `<div class="table-wrap"><table class="tbl"><thead><tr><th>Nama produk</th><th class="num">Jumlah terjual</th><th class="num">Omzet</th><th class="num">Laba kotor</th></tr></thead><tbody>${sold.map((item) => `<tr><td data-label="Nama produk">${esc(item.nama)}</td><td class="num" data-label="Jumlah terjual">${item.qty}</td><td class="num" data-label="Omzet">${rp(item.omzet)}</td><td class="num" data-label="Laba kotor">${rp(item.laba)}</td></tr>`).join('')}</tbody></table></div>` : '<p class="muted">Belum ada produk yang terjual pada periode ini.</p>'}</section>
   ${Object.keys(byKat).length ? `<section class="card"><h2>Pengeluaran per kategori</h2><ul class="rows">${Object.entries(byKat).map(([k, v]) => `<li><span>${esc(k)}</span><b>${rp(v)}</b></li>`).join('')}</ul></section>` : ''}
-  <div class="row wrap no-print"><button class="btn primary" data-act="xlsx">Unduh Excel (.xlsx)</button><button class="btn" data-act="csv">Unduh CSV</button><button class="btn" data-act="print">Cetak atau simpan PDF</button></div>`;
+  <div class="report-actions row wrap no-print"><button class="btn primary" data-act="xlsx">Unduh Excel (.xlsx)</button><button class="btn" data-act="csv">Unduh CSV</button><button class="btn" data-act="print">Cetak atau simpan PDF</button></div>
+  <section id="report-print" class="report-print" aria-hidden="true"><header><h1>Laporan Barang Terjual</h1><p>${esc(S.cfg.toko || 'WarungPintar')}</p><p>Periode: ${fmtDate(from)} hingga ${fmtDate(to)}</p></header><table><thead><tr><th>No.</th><th>Nama Barang</th><th>Jumlah</th><th>Harga Satuan Rata-rata</th><th>Total Penjualan</th></tr></thead><tbody>${sold.length ? printRows : '<tr><td colspan="5">Tidak ada barang terjual pada periode ini.</td></tr>'}</tbody>${sold.length ? `<tfoot><tr><td colspan="4">Total penjualan</td><td>${rp(printTotal)}</td></tr></tfoot>` : ''}</table><footer>Dicetak pada ${new Date().toLocaleString('id-ID')}</footer></section></section>`;
 }
 function downloadFile(name, mime, content) {
   const a = document.createElement('a');
@@ -1177,7 +1192,6 @@ const A = {
     if (!sale || sale.metode !== 'qris' || sale.statusPembayaran !== 'menunggu_konfirmasi') {
       return toast('Transaksi QRIS tidak lagi menunggu konfirmasi.', 'err');
     }
-    if (!(await confirmModal('Batalkan transaksi QRIS?', 'Batalkan transaksi', 'Status akan menjadi dibatalkan dan jumlah stok transaksi dikembalikan.'))) return;
     const canceled = { ...sale, statusPembayaran: 'dibatalkan', dibatalkanPada: new Date().toISOString() };
     await db.atomic(['sales', 'products'], (store) => {
       store('sales').put(canceled);
@@ -1294,7 +1308,7 @@ const A = {
   togglelunas: () => { S.showLunas = !S.showLunas; render(); },
   csv: exportCSV,
   xlsx: exportXlsx,
-  print: () => window.print(),
+  print: () => { document.body.classList.add('print-report'); setTimeout(() => window.print(), 50); },
   'print-receipt': () => { document.body.classList.add('print-receipt'); window.print(); document.body.classList.remove('print-receipt'); },
   saveprofile: async () => {
     const name = $('#s-toko').value.trim();
@@ -1394,6 +1408,8 @@ document.addEventListener('click', (e) => {
   const el = e.target.closest('[data-act]');
   if (!el || !A[el.dataset.act]) return;
   e.preventDefault();
+  if (el.disabled) return;
+  el.disabled = true;
   if (OWNER_ONLY_ACTIONS.has(el.dataset.act) && !OWNER()) {
     return toast('Fungsi ini hanya tersedia untuk pemilik toko.', 'err');
   }
@@ -1401,7 +1417,8 @@ document.addEventListener('click', (e) => {
     : el.dataset.act === 'logout' ? 'Sedang keluar...'
       : 'Sedang memproses...';
   withLoading(() => A[el.dataset.act](el.dataset, el), message, { showLoader: el.dataset.act !== 'confirm-qris' })
-    .catch((err) => { console.error(err); toast('Terjadi kesalahan: ' + err.message, 'err'); });
+    .catch((err) => { console.error(err); toast('Terjadi kesalahan: ' + err.message, 'err'); })
+    .finally(() => { if (el.isConnected) el.disabled = false; });
 });
 document.addEventListener('submit', (e) => {
   if (e.target.id === 'auth-form') {
@@ -1542,3 +1559,4 @@ addEventListener('online', netStatus); addEventListener('offline', netStatus);
     document.body.classList.add('app-ready');
   }
 })();
+window.addEventListener('afterprint', () => document.body.classList.remove('print-report'));
