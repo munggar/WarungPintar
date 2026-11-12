@@ -4,6 +4,7 @@ import { createXlsx } from './xlsx.js';
 import { decryptBackup, encryptBackup } from './crypto.js';
 import * as supabase from './supabase.js';
 import * as cloud from './cloud-sync.js';
+import { bindRupiahInput, formatRupiahInput, parseRupiahInput } from './currency.js';
 import { receiptJpeg, receiptPdf, renderReceiptCanvas } from './receipt.js';
 
 /* ============ Utilitas ============ */
@@ -287,11 +288,6 @@ function openDialog(html) {
   return d;
 }
 
-function formatRupiahInput(value) {
-  const digits = String(value ?? '').replace(/\D/g, '').replace(/^0+(?=\d)/, '');
-  return digits.replace(/\B(?=(\d{3})+(?!\d))/g, '.');
-}
-
 function fieldHtml(f) {
   const id = 'f_' + f.name;
   const common = `id="${id}" name="${f.name}"${f.required ? ' required' : ''}`;
@@ -323,20 +319,7 @@ function formModal({ title, fields = [], submit = 'Simpan', note = '', validate 
     const finish = (v) => { if (done) return; done = true; if (d.open) d.close(); resolve(v); };
     const form = $('form', d);
     const fail = (msg, el) => { $('#dlg-err').textContent = msg; el && el.focus(); };
-    form.querySelectorAll('[data-currency]').forEach((el) => {
-      el.addEventListener('input', () => {
-        const cursor = el.selectionStart;
-        const digitsBeforeCursor = el.value.slice(0, cursor).replace(/\D/g, '').length;
-        el.value = formatRupiahInput(el.value);
-        let nextCursor = 0;
-        let digitsSeen = 0;
-        while (nextCursor < el.value.length && digitsSeen < digitsBeforeCursor) {
-          if (/\d/.test(el.value[nextCursor])) digitsSeen++;
-          nextCursor++;
-        }
-        el.setSelectionRange(nextCursor, nextCursor);
-      });
-    });
+    form.querySelectorAll('[data-currency]').forEach((el) => bindRupiahInput(el));
     form.onsubmit = (e) => {
       e.preventDefault();
       const vals = {};
@@ -344,7 +327,7 @@ function formModal({ title, fields = [], submit = 'Simpan', note = '', validate 
         const el = form.elements[f.name];
         let v = f.type === 'checkbox' ? el.checked : el.value.trim();
         if (f.type === 'number') v = v === '' ? null : Number(v);
-        if (f.type === 'currency') v = v === '' ? null : Number(v.replace(/\./g, ''));
+        if (f.type === 'currency') v = parseRupiahInput(v);
         if (f.required && (v === '' || v === null)) return fail(`${f.label} wajib diisi.`, el);
         if ((f.type === 'number' || f.type === 'currency') && v !== null && (!Number.isSafeInteger(v) || (f.min != null && v < f.min))) return fail(`${f.label} harus berupa bilangan bulat yang aman${f.min != null ? ' minimal ' + f.min : ''}.`, el);
         vals[f.name] = v;
@@ -487,7 +470,7 @@ function renderCart() {
     ${S.cart.length ? `<ul class="plain">${rows}</ul>` : '<p class="muted">Pilih produk untuk memulai transaksi.</p>'}
     <div class="total"><span>Total</span><b>${rp(total)}</b></div>
     <div class="seg" role="group" aria-label="Metode pembayaran">${['tunai', 'transfer', 'qris', 'kasbon'].map((m) => `<button class="${S.metode === m ? 'on' : ''}" data-act="metode" data-m="${m}" aria-pressed="${S.metode === m}">${m.toUpperCase() === 'QRIS' ? 'QRIS' : m[0].toUpperCase() + m.slice(1)}</button>`).join('')}</div>
-    ${S.metode === 'tunai' ? `<label class="field"><span>Jumlah uang diterima</span><input id="terima" inputmode="numeric" value="${esc(S.terima)}" placeholder="Opsional"></label>
+    ${S.metode === 'tunai' ? `<label class="field"><span>Jumlah uang diterima</span><input id="terima" data-currency inputmode="numeric" value="${esc(formatRupiahInput(S.terima))}" placeholder="Opsional"></label>
       <div class="chips">${total ? `<button class="btn small" data-act="cash" data-v="${total}">Uang pas</button>` : ''}${[20000, 50000, 100000].map((v) => `<button class="btn small" data-act="cash" data-v="${v}">${rp(v)}</button>`).join('')}</div><p id="kembali" class="kembali"></p>` : ''}
     ${S.metode === 'transfer' ? `<section class="transfer-payment" aria-label="Informasi rekening transfer"><h3>Informasi rekening toko</h3>${transferAccountDetails()}<p class="muted small">Pastikan pembayaran telah diterima sebelum menyelesaikan transaksi.</p></section>` : ''}
     ${S.metode === 'kasbon' ? `<label class="field"><span>Pelanggan</span><select id="custsel"><option value="">Pilih pelanggan</option>${custOpts.map(([v, l]) => `<option value="${esc(v)}"${v === S.custId ? ' selected' : ''}>${esc(l)}</option>`).join('')}</select></label>
@@ -512,6 +495,11 @@ function renderCart() {
     })() : ''}
     <button class="btn primary big" data-act="checkout" ${S.cart.length && !S.checkoutInProgress && (S.metode !== 'qris' || (S.cfg.qrisImage && !S.qrisPreview)) ? '' : 'disabled'}>${S.checkoutInProgress ? 'Menyimpan transaksi…' : 'Simpan transaksi'}</button>
     ${S.cart.length ? '<button class="btn ghost small" data-act="clearcart">Kosongkan keranjang</button>' : ''}`;
+  const received = $('#terima');
+  if (received) bindRupiahInput(received, (value) => {
+    S.terima = value == null ? '' : String(value);
+    updateKembali();
+  });
   updateKembali();
   renderPendingQris();
   renderRecentSales();
@@ -762,27 +750,184 @@ async function productForm(p) {
 /* ============ Belanja barang ============ */
 function vBelanja() {
   const list = [...S.purchases].sort((a, b) => b.waktu.localeCompare(a.waktu)).slice(0, 30);
-  return `<p class="muted">Catat setiap barang yang diterima. Stok akan bertambah dan harga beli produk diperbarui.</p>
-  <button class="btn primary big" data-act="addpurchase" ${S.products.length ? '' : 'disabled'}>Catat belanja barang</button>
+  return `<p class="muted">Catat barang yang dibeli dari dana toko. Pilih barang untuk restock atau ketik nama baru agar produk dan stok awal dibuat otomatis. Total pembelian tercatat di riwayat belanja, bukan pengeluaran operasional.</p>
+  <button class="btn primary big" data-act="addpurchase">Catat belanja barang</button>
   <h2>Riwayat pembelian stok</h2>
   <ul class="rows">${list.length ? list.map((b) => `<li><span>${esc(b.nama)} ×${b.qty}<small>${fmtDate(b.waktu)}${b.supplier ? ' · ' + esc(b.supplier) : ''}</small></span><b>${rp(b.total)}</b></li>`).join('') : '<li class="muted">Belum ada belanja tercatat.</li>'}</ul>`;
 }
 async function addPurchase() {
-  const v = await formModal({
-    title: 'Catat belanja barang',
-    fields: [
-      { name: 'productId', label: 'Produk', type: 'select', options: S.products.map((p) => [p.id, p.nama]), value: S.products[0]?.id },
-      { name: 'qty', label: 'Jumlah masuk', type: 'number', min: 1, required: true },
-      { name: 'hargaBeli', label: 'Harga beli per satuan (Rp)', type: 'number', min: 0, required: true },
-      { name: 'supplier', label: 'Pemasok (opsional)' },
-    ],
+  return new Promise((resolve) => {
+    const d = openDialog(`<form class="dlg-body form-dialog" novalidate>
+      <header class="form-dialog-heading"><h2>Catat belanja barang</h2><p class="muted">Total pembelian tersimpan sebagai belanja stok, bukan pengeluaran operasional, agar harga pokok tidak dihitung dua kali pada laba.</p></header>
+      <div class="form-dialog-fields">
+        <label class="field purchase-product-field"><span>Nama barang</span><input id="purchase-product-query" type="text" role="combobox" aria-autocomplete="list" aria-expanded="false" aria-controls="purchase-suggestions" autocomplete="off" required><div id="purchase-suggestions" class="purchase-suggestions" role="listbox" hidden></div><small id="purchase-product-hint">Ketik untuk mencari barang atau menambahkan barang baru.</small></label>
+        ${fieldHtml({ name: 'qty', label: 'Jumlah masuk', type: 'number', min: 1, required: true })}
+        ${fieldHtml({ name: 'hargaBeli', label: 'Harga beli per satuan (Rp)', type: 'currency', min: 0, required: true })}
+        ${fieldHtml({ name: 'supplier', label: 'Pemasok (opsional)' })}
+        <section id="purchase-new-fields" class="purchase-new-fields" hidden>
+          <h3>Detail produk baru</h3>
+          ${fieldHtml({ name: 'kategori', label: 'Kategori', type: 'select', options: KATEGORI, value: 'Lainnya' })}
+          ${fieldHtml({ name: 'hargaJual', label: 'Harga jual per satuan (Rp)', type: 'currency', min: 0, required: true })}
+          ${fieldHtml({ name: 'stokMinimum', label: 'Batas stok minimum', type: 'number', min: 0, value: 5, required: true })}
+          ${fieldHtml({ name: 'satuan', label: 'Satuan', value: 'pcs', required: true })}
+          ${fieldHtml({ name: 'barcode', label: 'Barcode (opsional)' })}
+        </section>
+      </div>
+      <p class="err" id="purchase-error" role="alert"></p>
+      <div class="row end form-dialog-actions"><button type="button" class="btn ghost" data-close>Batal</button><button class="btn primary">Simpan belanja</button></div>
+    </form>`);
+    d.classList.add('form-dialog-open');
+
+    let done = false;
+    let selectedProductId = '';
+    let createNewProduct = false;
+    const finish = (value) => { if (done) return; done = true; if (d.open) d.close(); resolve(value); };
+    const form = $('form', d);
+    const query = $('#purchase-product-query', d);
+    const suggestions = $('#purchase-suggestions', d);
+    const newFields = $('#purchase-new-fields', d);
+    const hint = $('#purchase-product-hint', d);
+    const error = $('#purchase-error', d);
+    const fail = (message, element) => { error.textContent = message; element?.focus(); };
+    form.querySelectorAll('[data-currency]').forEach((el) => bindRupiahInput(el));
+
+    const renderSuggestions = (showAll = false) => {
+      const name = query.value.trim();
+      const normalized = name.toLowerCase();
+      const exactMatches = normalized
+        ? S.products.filter((product) => product.nama.trim().toLowerCase() === normalized)
+        : [];
+      const selected = S.products.find((product) => product.id === selectedProductId && product.nama.trim().toLowerCase() === normalized);
+      if (selected || exactMatches.length === 1) {
+        const exact = selected || exactMatches[0];
+        selectedProductId = exact.id;
+        createNewProduct = false;
+        newFields.hidden = true;
+        suggestions.hidden = true;
+        query.setAttribute('aria-expanded', 'false');
+        hint.textContent = `Barang tersedia: ${exact.stok} ${exact.satuan}. Stok akan ditambah saat disimpan.`;
+        return;
+      }
+
+      if (exactMatches.length !== 1) selectedProductId = '';
+      if (exactMatches.length > 1) createNewProduct = false;
+      const matches = S.products
+        .filter((product) => !normalized || product.nama.toLowerCase().includes(normalized))
+        .sort((a, b) => a.nama.localeCompare(b.nama))
+        .slice(0, 8);
+
+      if (normalized && !matches.length) createNewProduct = true;
+      if (!normalized) createNewProduct = false;
+      newFields.hidden = !createNewProduct;
+      hint.textContent = exactMatches.length > 1
+        ? 'Ada beberapa produk dengan nama yang sama. Pilih produk yang sesuai.'
+        : createNewProduct
+          ? 'Barang baru akan dibuat otomatis dengan jumlah masuk sebagai stok awal.'
+          : 'Pilih saran untuk restock, atau pilih Tambah barang baru.';
+
+      const options = matches.map((product) => `<button type="button" class="purchase-option" role="option" data-product-id="${esc(product.id)}"><b>${esc(product.nama)}</b><small>Stok ${product.stok} ${esc(product.satuan)} · ${esc(product.kategori)}</small></button>`).join('');
+      const addNew = normalized && !exactMatches.length
+        ? `<button type="button" class="purchase-option purchase-add-new" data-purchase-new>+ Tambah barang baru: <b>${esc(name)}</b></button>`
+        : '';
+      suggestions.innerHTML = options + addNew;
+      suggestions.hidden = !(showAll || normalized) || (!options && !addNew);
+      query.setAttribute('aria-expanded', String(!suggestions.hidden));
+    };
+
+    query.addEventListener('input', () => {
+      createNewProduct = false;
+      renderSuggestions();
+      error.textContent = '';
+    });
+    query.addEventListener('focus', () => renderSuggestions(true));
+    suggestions.addEventListener('click', (event) => {
+      const option = event.target.closest('button');
+      if (!option) return;
+      if (option.dataset.productId) {
+        const product = S.products.find((item) => item.id === option.dataset.productId);
+        if (!product) return;
+        query.value = product.nama;
+        selectedProductId = product.id;
+        createNewProduct = false;
+        newFields.hidden = true;
+        suggestions.hidden = true;
+        query.setAttribute('aria-expanded', 'false');
+        hint.textContent = `Barang tersedia: ${product.stok} ${product.satuan}. Stok akan ditambah saat disimpan.`;
+      } else if (option.hasAttribute('data-purchase-new')) {
+        selectedProductId = '';
+        createNewProduct = true;
+        newFields.hidden = false;
+        suggestions.hidden = true;
+        query.setAttribute('aria-expanded', 'false');
+        hint.textContent = 'Barang baru akan dibuat otomatis dengan jumlah masuk sebagai stok awal.';
+        $('#f_hargaJual', d).focus();
+      }
+    });
+    form.onsubmit = async (event) => {
+      event.preventDefault();
+      const name = query.value.trim();
+      const exactMatches = S.products.filter((product) => product.nama.trim().toLowerCase() === name.toLowerCase());
+      const product = selectedProductId
+        ? S.products.find((item) => item.id === selectedProductId)
+        : exactMatches.length === 1 ? exactMatches[0] : null;
+      const isNew = !product;
+      if (!name) return fail('Nama barang wajib diisi.', query);
+      if (exactMatches.length > 1 && !selectedProductId) return fail('Pilih salah satu produk dengan nama yang sama dari saran.', query);
+      if (isNew && !createNewProduct) return fail('Pilih barang dari saran atau pilih Tambah barang baru.', query);
+
+      const qty = Number(form.elements.qty.value);
+      const hargaBeli = parseRupiahInput(form.elements.hargaBeli.value);
+      if (!Number.isSafeInteger(qty) || qty < 1) return fail('Jumlah masuk harus berupa bilangan bulat minimal 1.', form.elements.qty);
+      if (!Number.isSafeInteger(hargaBeli) || hargaBeli < 0) return fail('Harga beli harus berupa bilangan rupiah bulat yang valid.', form.elements.hargaBeli);
+      const total = qty * hargaBeli;
+      if (!Number.isSafeInteger(total)) return fail('Total belanja melebihi batas nilai yang dapat disimpan.', form.elements.hargaBeli);
+
+      let newProduct = null;
+      if (isNew) {
+        const hargaJual = parseRupiahInput(form.elements.hargaJual.value);
+        const stokMinimum = Number(form.elements.stokMinimum.value);
+        const satuan = form.elements.satuan.value.trim();
+        const barcode = form.elements.barcode.value.trim();
+        if (!name) return fail('Nama barang wajib diisi.', query);
+        if (!Number.isSafeInteger(hargaJual) || hargaJual < 0) return fail('Harga jual harus berupa bilangan rupiah bulat yang valid.', form.elements.hargaJual);
+        if (hargaJual < hargaBeli) return fail('Harga jual lebih rendah daripada harga beli. Periksa kembali untuk menghindari kerugian.', form.elements.hargaJual);
+        if (!Number.isSafeInteger(stokMinimum) || stokMinimum < 0) return fail('Batas stok minimum harus berupa bilangan bulat nol atau lebih.', form.elements.stokMinimum);
+        if (!satuan) return fail('Satuan wajib diisi.', form.elements.satuan);
+        if (barcode && S.products.some((item) => item.barcode === barcode)) return fail('Barcode ini telah digunakan oleh produk lain.', form.elements.barcode);
+        newProduct = {
+          id: uid(), createdAt: new Date().toISOString(), nama: name,
+          kategori: form.elements.kategori.value, hargaBeli, hargaJual,
+          stok: 0, stokMinimum, satuan, barcode,
+        };
+      }
+
+      const target = product || newProduct;
+      const purchase = {
+        id: uid(), waktu: new Date().toISOString(), productId: target.id,
+        nama: target.nama, qty, hargaBeli, total,
+        supplier: form.elements.supplier.value.trim(),
+      };
+      const submit = form.querySelector('button.primary');
+      submit.disabled = true;
+      error.textContent = '';
+      try {
+        await db.recordPurchase(purchase, newProduct);
+        finish(true);
+        toast(isNew
+          ? `${target.nama} ditambahkan dengan stok awal ${qty} ${target.satuan}.`
+          : `Stok ${target.nama} bertambah sebanyak ${qty}.`);
+        await refresh();
+      } catch (saveError) {
+        console.error('Belanja barang gagal disimpan.', saveError);
+        fail(saveError.message || 'Belanja barang gagal disimpan.');
+        submit.disabled = false;
+      }
+    };
+    d.addEventListener('close', () => { d.classList.remove('form-dialog-open'); finish(null); }, { once: true });
+    d.oncancel = () => finish(null);
+    query.focus();
+    renderSuggestions(true);
   });
-  if (!v) return;
-  const p = S.products.find((x) => x.id === v.productId);
-  const rec = { id: uid(), waktu: new Date().toISOString(), productId: p.id, nama: p.nama, qty: v.qty, hargaBeli: v.hargaBeli, total: v.qty * v.hargaBeli, supplier: v.supplier };
-  await db.atomic(['purchases', 'products'], (st) => { st('purchases').put(rec); db.adjustStock(st, p.id, v.qty, v.hargaBeli); });
-  toast(`Stok ${p.nama} bertambah sebanyak ${v.qty}.`);
-  await refresh();
 }
 
 /* ============ Pengeluaran dan uang pribadi ============ */
@@ -806,7 +951,7 @@ async function addMoney(kind) {
     title: isExp ? 'Catat pengeluaran usaha' : 'Catat penarikan pribadi',
     fields: [
       ...(isExp ? [{ name: 'kategori', label: 'Kategori', type: 'select', options: ['Listrik', 'Sewa', 'Gaji', 'Transportasi', 'Kemasan', 'Lainnya'], value: 'Listrik' }] : []),
-      { name: 'jumlah', label: 'Jumlah (Rp)', type: 'number', min: 1, required: true },
+      { name: 'jumlah', label: 'Jumlah (Rp)', type: 'currency', min: 1, required: true },
       { name: 'tanggal', label: 'Tanggal', type: 'date', value: L.ymd(new Date()), required: true },
       { name: 'catatan', label: 'Catatan (opsional)' },
     ],
@@ -854,7 +999,7 @@ async function payDebt(id) {
     if (sisa <= 0) return toast('Kasbon ini telah lunas.', 'err');
     const v = await formModal({
       title: 'Catat pembayaran kasbon', note: `Sisa kasbon: ${rp(sisa)}`,
-      fields: [{ name: 'jumlah', label: 'Jumlah dibayar (Rp)', type: 'number', min: 1, required: true, value: sisa }, { name: 'tanggal', label: 'Tanggal', type: 'date', value: L.ymd(new Date()), required: true }],
+      fields: [{ name: 'jumlah', label: 'Jumlah dibayar (Rp)', type: 'currency', min: 1, required: true, value: sisa }, { name: 'tanggal', label: 'Tanggal', type: 'date', value: L.ymd(new Date()), required: true }],
       validate: (x) => (x.jumlah > sisa ? `Melebihi sisa kasbon (${rp(sisa)}).` : ''),
     });
     if (!v) return;
@@ -884,7 +1029,7 @@ async function manualDebt() {
     title: 'Catat kasbon secara manual',
     fields: [
       { name: 'customerId', label: 'Pelanggan', type: 'select', options: S.customers.map((c) => [c.id, c.nama]), value: S.customers[0].id },
-      { name: 'jumlah', label: 'Jumlah (Rp)', type: 'number', min: 1, required: true },
+      { name: 'jumlah', label: 'Jumlah (Rp)', type: 'currency', min: 1, required: true },
       { name: 'jt', label: 'Jatuh tempo', type: 'date', value: L.ymd(L.addDays(new Date(), 14)), required: true },
       { name: 'catatan', label: 'Catatan (opsional)' },
     ],
@@ -1440,7 +1585,6 @@ document.addEventListener('input', (e) => {
   const t = e.target;
   if (t.id === 'q') { S.q = t.value; renderPlist(); }
   else if (t.id === 'pq') renderProdList(t.value);
-  else if (t.id === 'terima') { S.terima = t.value.replace(/\D/g, ''); updateKembali(); }
   else if (t.id === 'jt') S.jt = t.value;
 });
 document.addEventListener('change', (e) => {

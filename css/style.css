@@ -285,6 +285,14 @@ dialog::backdrop { background: rgba(23,32,51,.55); }
 .form-dialog > .err { flex: 0 0 auto; }
 .form-dialog-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin-top: 8px; padding-top: 8px; background: var(--putih); }
 .form-dialog-actions > .btn { width: 100%; min-width: 0; padding: 6px 8px; }
+.purchase-suggestions:not([hidden]) { display: grid; max-height: 220px; overflow-y: auto; border: 1px solid var(--garis); border-radius: var(--r); background: #fff; }
+.purchase-option { display: grid; gap: 2px; width: 100%; padding: 9px 12px; border: 0; border-bottom: 1px solid var(--garis); background: #fff; color: var(--tinta); text-align: left; }
+.purchase-option:last-child { border-bottom: 0; }
+.purchase-option:hover, .purchase-option:focus { background: #eef2fc; outline: none; }
+.purchase-option small { color: var(--abu); font-weight: 400; }
+.purchase-option.purchase-add-new { display: block; color: var(--biru); }
+.purchase-new-fields { margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--garis); }
+.purchase-new-fields h3 { margin: 0 0 8px; }
 .struk { background: #fffdf2; border: 1px dashed var(--abu); padding: 12px; font: .9rem/1.45 ui-monospace, Menlo, Consolas, monospace; white-space: pre-wrap; }
 
 /* Toast */

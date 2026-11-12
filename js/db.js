@@ -250,6 +250,26 @@ export function adjustStock(store, productId, delta, newHargaBeli) {
   };
 }
 
+export function recordPurchase(purchase, newProduct = null) {
+  const { productId, qty, hargaBeli, total } = purchase || {};
+  if (!productId || !Number.isSafeInteger(qty) || qty <= 0) {
+    throw new Error('Data belanja barang tidak valid.');
+  }
+  if (!Number.isSafeInteger(hargaBeli) || hargaBeli < 0
+    || !Number.isSafeInteger(total) || total !== qty * hargaBeli) {
+    throw new Error('Total belanja tidak sesuai dengan jumlah dan harga beli.');
+  }
+  if (newProduct && newProduct.id !== productId) {
+    throw new Error('Produk baru tidak sesuai dengan catatan belanja.');
+  }
+
+  return atomic(['purchases', 'products'], (store) => {
+    if (newProduct) store('products').put(newProduct);
+    store('purchases').put(purchase);
+    adjustStock(store, productId, qty, hargaBeli);
+  });
+}
+
 export function vaultSnapshot() {
   assertUnlocked();
   return { data: clone(vault), generation, dirty };
