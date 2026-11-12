@@ -7,7 +7,7 @@
   "scripts": {
     "start": "npx --yes serve . -l 8080",
     "build": "npm run build:scanner",
-    "build:scanner": "esbuild js/barcode-scanner-entry.js --bundle --minify --format=esm --target=es2020 --outfile=js/barcode-scanner.js",
+    "build:scanner": "node ./node_modules/esbuild/bin/esbuild js/barcode-scanner-entry.js --bundle --minify --format=esm --target=es2020 --outfile=js/barcode-scanner.js",
     "test": "node --test"
   },
   "dependencies": {
