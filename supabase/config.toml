@@ -1,2 +1,5 @@
 [functions.register-owner]
 verify_jwt = false
+
+[functions.reset-password]
+verify_jwt = false

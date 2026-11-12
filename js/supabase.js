@@ -39,7 +39,7 @@ async function request(path, options = {}, retry = true) {
       throw new Error('Tidak dapat menghubungi fungsi pendaftaran. Deploy register-owner ke project Supabase dengan `npx supabase functions deploy register-owner`, lalu coba lagi.');
     }
     if (path === '/functions/v1/reset-password' && error instanceof TypeError) {
-      throw new Error('Fungsi reset-password belum dapat dihubungi. Deploy reset-password ke project Supabase yang sama dengan konfigurasi aplikasi, lalu coba lagi.');
+      throw new Error('Fungsi reset-password belum dapat dihubungi. Pastikan fungsi sudah dideploy dan secret APP_URL di Supabase sama persis dengan URL HTTPS aplikasi, lalu coba lagi.');
     }
     const isNetworkFailure = error instanceof TypeError
       || /failed to fetch|networkerror|load failed/i.test(error?.message || '');

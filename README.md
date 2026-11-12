@@ -115,14 +115,16 @@ Dari folder proyek, masuk ke Supabase CLI dan hubungkan proyek. Periksa kembali 
 ```bash
 npx supabase login
 npx supabase link --project-ref skvskjrhhekwvkwuxjec
-npx supabase secrets set APP_URL="http://localhost:8080"
+npx supabase secrets set APP_URL="https://warungpintar-ijd1.onrender.com"
 npx supabase functions deploy register-owner
 npx supabase functions deploy invite-assistant
 npx supabase functions deploy assistant-access
 npx supabase functions deploy reset-password
 ```
 
-`APP_URL` harus sama dengan origin aplikasi yang diizinkan pada Authentication → URL Configuration. Saat aplikasi di-hosting, gunakan origin HTTPS. Untuk pengembangan lokal, fungsi juga menerima `http://localhost` dan `http://127.0.0.1` pada port apa pun.
+Ganti nilai `APP_URL` dengan origin HTTPS aplikasi Anda jika domain Render berbeda. Nilai ini harus sama persis dengan **Site URL** pada Supabase Authentication → URL Configuration dan origin yang membuka aplikasi. Untuk pengembangan lokal, ubah sementara nilainya ke `http://localhost:8080`; fungsi juga menerima `http://localhost` dan `http://127.0.0.1` pada port apa pun.
+
+Fungsi `reset-password` menerima pemulihan tanpa sesi login dan memverifikasi kunci pemulihan sebelum mengubah kata sandi. Karena itu, `supabase/config.toml` menonaktifkan verifikasi JWT gateway untuk fungsi ini; jangan menghapus pemeriksaan kunci pemulihan di fungsi tersebut.
 
 ### 4. Aktifkan autentikasi
 
