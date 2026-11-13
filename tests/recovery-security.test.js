@@ -5,6 +5,7 @@ import {
   emailRateLimitFingerprint,
   isRecoveryCode,
   normalizeEmail,
+  requestPasswordResetEmail,
   verifyRecoveryEnvelope,
 } from '../supabase/functions/_shared/reset-security.js';
 
@@ -33,4 +34,65 @@ test('password reset rate-limit fingerprint is keyed and email-normalized', asyn
   assert.match(first, /^[0-9a-f]{64}$/);
   assert.equal(normalizeEmail(' OWNER@example.com '), 'owner@example.com');
   await assert.rejects(emailRateLimitFingerprint('owner@example.com', 'short'), /minimal 32 karakter/);
+});
+
+test('password recovery sends an Auth email link after consuming the persistent rate limit', async () => {
+  const calls = [];
+  const rateLimiter = {
+    async rpc(name, payload) {
+      calls.push({ kind: 'limit', name, payload });
+      return { data: true, error: null };
+    },
+  };
+  const authClient = {
+    auth: {
+      async resetPasswordForEmail(email, options) {
+        calls.push({ kind: 'email', email, options });
+        return { error: null };
+      },
+    },
+  };
+
+  const result = await requestPasswordResetEmail({
+    rateLimiter,
+    authClient,
+    email: ' OWNER@example.com ',
+    rateLimitSecret: 'a'.repeat(32),
+    redirectTo: 'https://warungpintar-frontend-staging.onrender.com',
+  });
+
+  assert.deepEqual(result, { request_received: true });
+  assert.deepEqual(calls, [
+    {
+      kind: 'limit',
+      name: 'consume_password_reset_attempt',
+      payload: { p_email_hash: await emailRateLimitFingerprint('owner@example.com', 'a'.repeat(32)) },
+    },
+    {
+      kind: 'email',
+      email: 'owner@example.com',
+      options: { redirectTo: 'https://warungpintar-frontend-staging.onrender.com' },
+    },
+  ]);
+});
+
+test('password recovery keeps the generic response and skips email when rate limited', async () => {
+  let emailSent = false;
+  const result = await requestPasswordResetEmail({
+    rateLimiter: { async rpc() { return { data: false, error: null }; } },
+    authClient: {
+      auth: {
+        async resetPasswordForEmail() {
+          emailSent = true;
+          return { error: null };
+        },
+      },
+    },
+    email: 'owner@example.com',
+    rateLimitSecret: 'a'.repeat(32),
+    redirectTo: 'https://warungpintar-frontend-staging.onrender.com',
+  });
+
+  assert.deepEqual(result, { request_received: true });
+  assert.equal(emailSent, false);
 });

@@ -158,11 +158,11 @@ export async function updatePassword(password) {
   return result;
 }
 
-export async function resetPassword(email, recoveryCode, password) {
+export async function resetPassword(email) {
   const { result } = await request('/functions/v1/reset-password', {
     method: 'POST',
-    body: JSON.stringify({ email, recoveryCode, password }),
-  });
+    body: JSON.stringify({ email }),
+  }, false);
   return result;
 }
 

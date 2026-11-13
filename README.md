@@ -119,7 +119,7 @@ Konfigurasi CLI staging terpisah di `supabase/.env.local`; file ini bukan sumber
 
 Deployment ini membuat Static Site terpisah dan tidak mengubah service, konfigurasi, atau data production. Buat service secara manual di Render; service staging belum otomatis dibuat atau dideploy oleh repository ini.
 
-1. Buat **New Static Site** dari repository `munggar/WarungPintar`, branch `main`, dengan nama persis `warungpintar-frontend-staging`. Biarkan Root Directory kosong (root repository), dan nonaktifkan Auto-Deploy sampai konfigurasi staging diperiksa.
+1. Buat **New Static Site** dari repository `munggar/WarungPintar`, branch `staging`, dengan nama persis `warungpintar-frontend-staging`. Biarkan Root Directory kosong (root repository), dan nonaktifkan Auto-Deploy sampai konfigurasi staging diperiksa.
 2. Atur:
    - Build Command: `npm ci --include=dev && npm run build:staging`
    - Publish Directory: `dist-staging`
@@ -130,7 +130,7 @@ Deployment ini membuat Static Site terpisah dan tidak mengubah service, konfigur
    - `STAGING_EXPECTED_PROJECT_REF=unkmykhwddwhbtuioqrg`
 4. Simpan konfigurasi, jalankan deploy manual, lalu pastikan URL deployment memakai HTTPS dan halaman menampilkan badge **STAGING**. Periksa juga bahwa build gagal bila service bukan bernama `warungpintar-frontend-staging`, variabel menunjuk ke project lain, atau konfigurasi staging tidak tersedia. Jangan mengarahkan service production yang sudah ada ke `dist-staging`.
 
-Build menghasilkan bundle barcode scanner secara terpisah, marker environment, dan cache service worker staging yang unik. Artefak hanya menyalin asset frontend yang diperlukan; konfigurasi lokal, secret, `supabase/`, migration, test, dan `node_modules` tidak disertakan. Build lokal tanpa `RENDER_SERVICE_NAME` dan `RENDER_EXTERNAL_URL` diperbolehkan untuk pemeriksaan; pada Render, kedua variabel itu divalidasi jika tersedia. `SUPABASE_PUBLISHABLE_KEY` tetap dapat dibaca pengguna karena frontend berjalan di browser, sehingga keamanan data harus ditegakkan oleh RLS dan backend—key ini bukan secret.
+Build menghasilkan bundle barcode scanner secara terpisah, marker environment, dan cache service worker staging yang unik. Seluruh pohon modul JavaScript disalin secara rekursif dan import lokal diverifikasi sebelum artefak diterbitkan; konfigurasi lokal, secret, `supabase/`, migration, test, dan `node_modules` tidak disertakan. Import dinamis `config.local.js` hanya merupakan fallback localhost dan tidak ikut dikemas. Build lokal tanpa `RENDER_SERVICE_NAME` dan `RENDER_EXTERNAL_URL` diperbolehkan untuk pemeriksaan; pada Render, kedua variabel itu divalidasi jika tersedia. `SUPABASE_PUBLISHABLE_KEY` tetap dapat dibaca pengguna karena frontend berjalan di browser, sehingga keamanan data harus ditegakkan oleh RLS dan backend—key ini bukan secret.
 
 ### Prasyarat
 

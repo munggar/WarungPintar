@@ -45,6 +45,9 @@ function validatedOrigin(value, label) {
 }
 
 export function validateStagingBuildEnvironment(env) {
+  if (!env || typeof env !== 'object' || Array.isArray(env)) {
+    fail('Konfigurasi build staging tidak valid.');
+  }
   if (env.WP_ENVIRONMENT !== 'staging') {
     fail('WP_ENVIRONMENT wajib bernilai staging.');
   }
@@ -114,10 +117,13 @@ async function listFiles(directory, relative = '') {
 }
 
 export function sanitizeProductionConfigSource(source) {
-  const productionUrl = /^export const PRODUCTION_SUPABASE_URL = .*;$/m;
-  const productionKey = /^export const PRODUCTION_SUPABASE_PUBLISHABLE_KEY = .*;$/m;
-  const productionUrlValue = source.match(/^export const PRODUCTION_SUPABASE_URL = ['"]([^'"]+)['"];$/m)?.[1];
-  const productionKeyValue = source.match(/^export const PRODUCTION_SUPABASE_PUBLISHABLE_KEY = ['"]([^'"]+)['"];$/m)?.[1];
+  if (typeof source !== 'string' || !source.trim()) {
+    fail('Konfigurasi production tidak dapat dipisahkan dengan aman untuk artefak staging.');
+  }
+  const productionUrl = /^export const PRODUCTION_SUPABASE_URL = (['"])([^'"]+)\1;$/m;
+  const productionKey = /^export const PRODUCTION_SUPABASE_PUBLISHABLE_KEY = (['"])([^'"]+)\1;$/m;
+  const productionUrlValue = source.match(productionUrl)?.[2];
+  const productionKeyValue = source.match(productionKey)?.[2];
   if (!productionUrl.test(source) || !productionKey.test(source)
     || !productionUrlValue || !productionKeyValue) {
     fail('Konfigurasi production tidak dapat dipisahkan dengan aman untuk artefak staging.');
@@ -129,6 +135,211 @@ export function sanitizeProductionConfigSource(source) {
     fail('Konfigurasi production masih tersisa dalam file konfigurasi staging.');
   }
   return sanitized;
+}
+
+function toPosixPath(filePath) {
+  return filePath.split(path.sep).join('/');
+}
+
+export async function copyJavaScriptModules(sourceDir, outputDir) {
+  await mkdir(outputDir, { recursive: true });
+
+  async function copyDirectory(source, relative = '') {
+    const entries = await readdir(source, { withFileTypes: true });
+    for (const entry of entries) {
+      const entryRelative = path.join(relative, entry.name);
+      const sourcePath = path.join(source, entry.name);
+      const outputPath = path.join(outputDir, entryRelative);
+      if (entry.isDirectory()) {
+        await copyDirectory(sourcePath, entryRelative);
+        continue;
+      }
+      if (!entry.isFile() || !entry.name.endsWith('.js') || EXCLUDED_JS.has(entry.name)) continue;
+
+      await mkdir(path.dirname(outputPath), { recursive: true });
+      if (entry.name === 'config.js') {
+        const configSource = await readFile(sourcePath, 'utf8');
+        await writeFile(outputPath, sanitizeProductionConfigSource(configSource));
+      } else {
+        await cp(sourcePath, outputPath);
+      }
+    }
+  }
+
+  await copyDirectory(sourceDir);
+}
+
+function findModuleReferences(source) {
+  const patterns = [
+    { kind: 'import', expression: /\bimport\s+(?:[^'";]*?\s+from\s+)?(['"])([^'"]+)\1/g },
+    { kind: 'export', expression: /\bexport\s+[^'";]*?\s+from\s+(['"])([^'"]+)\1/g },
+    { kind: 'dynamic-import', expression: /\bimport\s*\(\s*(['"])([^'"]+)\1\s*\)/g },
+    { kind: 'module-url', expression: /\bnew\s+URL\(\s*(['"])([^'"]+)\1\s*,\s*import\.meta\.url\s*\)/g },
+  ];
+  const references = [];
+  for (const { kind, expression } of patterns) {
+    for (const match of source.matchAll(expression)) {
+      references.push({ kind, specifier: match[2] });
+    }
+  }
+  return references;
+}
+
+function resolveLocalModulePath(importer, specifier, allowRootRelative = false) {
+  if (/^(?:[a-z][a-z\d+.-]*:|\/\/)/i.test(specifier)
+    || (!allowRootRelative && !specifier.startsWith('.') && !specifier.startsWith('/'))) {
+    return null;
+  }
+  const baseUrl = new URL(`https://staging.invalid/${toPosixPath(importer)}`);
+  const resolvedUrl = new URL(specifier, baseUrl);
+  if (resolvedUrl.origin !== baseUrl.origin) return null;
+  return decodeURIComponent(resolvedUrl.pathname.replace(/^\/+/, ''));
+}
+
+async function verifyStaticAssetReferences(outputDir, files) {
+  const normalizedFiles = new Set(files.map(toPosixPath));
+  const references = [];
+  const html = await readFile(path.join(outputDir, 'index.html'), 'utf8');
+  for (const tag of html.matchAll(/<[a-z][^>]*>/gi)) {
+    for (const attribute of tag[0].matchAll(/\b(?:src|href|poster)\s*=\s*(['"])(.*?)\1/gi)) {
+      references.push({ importer: 'index.html', specifier: attribute[2] });
+    }
+  }
+
+  const manifest = JSON.parse(await readFile(path.join(outputDir, 'manifest.webmanifest'), 'utf8'));
+  const collectManifestReferences = (value) => {
+    if (!value || typeof value !== 'object') return;
+    if (Array.isArray(value)) {
+      for (const item of value) collectManifestReferences(item);
+      return;
+    }
+    for (const [key, nestedValue] of Object.entries(value)) {
+      if (key === 'src' && typeof nestedValue === 'string') {
+        references.push({ importer: 'manifest.webmanifest', specifier: nestedValue });
+      } else {
+        collectManifestReferences(nestedValue);
+      }
+    }
+  };
+  collectManifestReferences(manifest);
+
+  const serviceWorker = await readFile(path.join(outputDir, 'sw.js'), 'utf8');
+  const cacheList = serviceWorker.match(/const BERKAS = \[([\s\S]*?)\];/);
+  if (!cacheList) fail('Daftar asset service worker staging tidak dapat diperiksa.');
+  for (const item of cacheList[1].matchAll(/(['"])([^'"]+)\1/g)) {
+    references.push({ importer: 'sw.js', specifier: item[2] });
+  }
+
+  for (const file of normalizedFiles) {
+    if (!file.endsWith('.css')) continue;
+    const source = await readFile(path.join(outputDir, ...file.split('/')), 'utf8');
+    for (const item of source.matchAll(/url\(\s*(['"]?)(.*?)\1\s*\)/gi)) {
+      references.push({ importer: file, specifier: item[2] });
+    }
+    for (const item of source.matchAll(/@import\s+(?:url\(\s*)?(['"])([^'"]+)\1\s*\)?/gi)) {
+      references.push({ importer: file, specifier: item[2] });
+    }
+  }
+
+  for (const reference of references) {
+    const asset = resolveLocalModulePath(reference.importer, reference.specifier, true);
+    if (asset === null) continue;
+    const normalizedAsset = asset || 'index.html';
+    if (!normalizedFiles.has(normalizedAsset)) {
+      fail(`Asset lokal tidak ditemukan: ${normalizedAsset} (dirujuk dari ${reference.importer}).`);
+    }
+  }
+}
+
+function isOptionalLocalConfigReference(importer, reference) {
+  return importer === 'js/config.js'
+    && reference.specifier === './config.local.js'
+    && ['dynamic-import', 'module-url'].includes(reference.kind);
+}
+
+function moduleScriptSources(html) {
+  const sources = [];
+  for (const match of html.matchAll(/<script\b[^>]*>/gi)) {
+    const tag = match[0];
+    const type = tag.match(/\btype\s*=\s*(['"])(.*?)\1/i)?.[2];
+    const source = tag.match(/\bsrc\s*=\s*(['"])(.*?)\1/i)?.[2];
+    if (type?.toLowerCase() === 'module' && source) sources.push(source);
+  }
+  return sources;
+}
+
+async function verifyJavaScriptDependencies(outputDir, files) {
+  const normalizedFiles = new Set(files.map(toPosixPath));
+  const html = await readFile(path.join(outputDir, 'index.html'), 'utf8');
+  const scriptSources = moduleScriptSources(html);
+  if (scriptSources.length === 0) fail('index.html tidak memiliki entrypoint JavaScript module.');
+
+  const queue = [];
+  for (const source of scriptSources) {
+    const entrypoint = resolveLocalModulePath('index.html', source, true);
+    if (!entrypoint) continue;
+    if (!normalizedFiles.has(entrypoint)) {
+      fail(`Entrypoint JavaScript tidak ditemukan: ${entrypoint}.`);
+    }
+    queue.push(entrypoint);
+  }
+  for (const file of normalizedFiles) {
+    if (file.endsWith('.js')) queue.push(file);
+  }
+
+  const visited = new Set();
+  while (queue.length) {
+    const importer = queue.pop();
+    if (visited.has(importer)) continue;
+    visited.add(importer);
+    const source = await readFile(path.join(outputDir, ...importer.split('/')), 'utf8');
+    for (const reference of findModuleReferences(source)) {
+      const dependency = resolveLocalModulePath(importer, reference.specifier);
+      if (!dependency) continue;
+      if (!normalizedFiles.has(dependency)) {
+        if (isOptionalLocalConfigReference(importer, reference)) continue;
+        fail(`Dependensi JavaScript lokal tidak ditemukan: ${dependency} (dari ${importer}).`);
+      }
+      if (dependency.endsWith('.js')) queue.push(dependency);
+    }
+  }
+}
+
+function extractProductionConfigValues(source) {
+  const productionUrlPattern = /^export const PRODUCTION_SUPABASE_URL = (['"])([^'"]+)\1;$/m;
+  const productionKeyPattern = /^export const PRODUCTION_SUPABASE_PUBLISHABLE_KEY = (['"])([^'"]+)\1;$/m;
+  const productionUrlValue = source.match(productionUrlPattern)?.[2];
+  const productionKeyValue = source.match(productionKeyPattern)?.[2];
+  if (!productionUrlValue || !productionKeyValue) {
+    fail('Konfigurasi production tidak dapat diperiksa dengan aman.');
+  }
+  return { productionUrlValue, productionKeyValue };
+}
+
+async function verifyStagingRuntimeConfig(outputDir) {
+  const source = await readFile(path.join(outputDir, 'js', 'config.runtime.js'), 'utf8');
+  const serializedConfig = source.match(/^const runtimeConfig = Object\.freeze\((\{[^\r\n]*\})\);$/m)?.[1];
+  if (!serializedConfig) fail('Konfigurasi runtime staging tidak memiliki format yang diharapkan.');
+
+  let config;
+  try {
+    config = JSON.parse(serializedConfig);
+  } catch {
+    fail('Konfigurasi runtime staging bukan JSON yang valid.');
+  }
+  if (!config || typeof config !== 'object' || Array.isArray(config)) {
+    fail('Konfigurasi runtime staging harus berupa object.');
+  }
+  const validAppUrl = config.appUrl === null
+    || (typeof config.appUrl === 'string'
+      && validatedOrigin(config.appUrl, 'appUrl') === config.appUrl);
+  if (config.environment !== 'staging'
+    || config.supabaseUrl !== `https://${STAGING_PROJECT_REF}.supabase.co`
+    || config.expectedProjectRef !== STAGING_PROJECT_REF
+    || !/^sb_publishable_[A-Za-z0-9_-]+$/.test(config.publishableKey)
+    || !validAppUrl) {
+    fail('Konfigurasi runtime staging tidak valid atau tidak cocok dengan project yang disetujui.');
+  }
 }
 
 export async function buildBarcodeScanner(esbuildApi, outfile) {
@@ -151,19 +362,7 @@ async function copyFrontend(tempDir) {
   }
 
   const jsOutputDir = path.join(tempDir, 'js');
-  await mkdir(jsOutputDir, { recursive: true });
-  const jsEntries = await readdir(path.join(ROOT, 'js'), { withFileTypes: true });
-  for (const entry of jsEntries) {
-    if (!entry.isFile() || !entry.name.endsWith('.js') || EXCLUDED_JS.has(entry.name)) continue;
-    const sourcePath = path.join(ROOT, 'js', entry.name);
-    const outputPath = path.join(jsOutputDir, entry.name);
-    if (entry.name === 'config.js') {
-      const configSource = await readFile(sourcePath, 'utf8');
-      await writeFile(outputPath, sanitizeProductionConfigSource(configSource));
-    } else {
-      await cp(sourcePath, outputPath);
-    }
-  }
+  await copyJavaScriptModules(path.join(ROOT, 'js'), jsOutputDir);
 
   const scannerOutput = path.join(jsOutputDir, 'barcode-scanner.js');
   await buildBarcodeScanner(esbuild, scannerOutput);
@@ -218,13 +417,23 @@ export async function verifyStagingOutput(tempDir) {
   for (const file of expectedFiles) {
     if (!files.includes(file)) fail(`Asset frontend staging tidak ditemukan: ${file}.`);
   }
+  await verifyJavaScriptDependencies(tempDir, files);
+  await verifyStaticAssetReferences(tempDir, files);
+  await verifyStagingRuntimeConfig(tempDir);
 
+  const { productionUrlValue, productionKeyValue } = extractProductionConfigValues(
+    await readFile(path.join(ROOT, 'js', 'config.js'), 'utf8'),
+  );
   for (const file of files) {
-    const content = await readFile(path.join(tempDir, file), 'utf8').catch(() => '');
-    if (content.includes(PRODUCTION_PROJECT_REF)) {
+    const content = await readFile(path.join(tempDir, file));
+    const text = content.toString('utf8');
+    if (text.includes(PRODUCTION_PROJECT_REF)) {
       fail('Artefak staging memuat referensi project Supabase production.');
     }
-    if (/sb_secret_[A-Za-z0-9_-]+|eyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}|(?:SUPABASE_SERVICE_ROLE_KEY|SUPABASE_SECRET_KEY)\s*[:=]\s*['"][^'"]+/i.test(content)) {
+    if (text.includes(productionUrlValue) || text.includes(productionKeyValue)) {
+      fail('Artefak staging memuat URL atau Publishable Key project Supabase production.');
+    }
+    if (/sb_secret_[A-Za-z0-9_-]+|eyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}|(?:SUPABASE_SERVICE_ROLE_KEY|SUPABASE_SECRET_KEY)\s*[:=]\s*['"][^'"]+/i.test(text)) {
       fail('Artefak staging memuat pola credential backend yang dilarang.');
     }
   }

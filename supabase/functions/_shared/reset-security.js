@@ -38,6 +38,27 @@ export async function emailRateLimitFingerprint(email, secret) {
   return [...digest].map((byte) => byte.toString(16).padStart(2, '0')).join('');
 }
 
+export async function requestPasswordResetEmail({
+  rateLimiter,
+  authClient,
+  email,
+  rateLimitSecret,
+  redirectTo,
+}) {
+  const normalizedEmail = normalizeEmail(email);
+  const emailHash = await emailRateLimitFingerprint(normalizedEmail, rateLimitSecret);
+  const { data: allowed, error } = await rateLimiter.rpc(
+    'consume_password_reset_attempt',
+    { p_email_hash: emailHash },
+  );
+  if (error) throw error;
+  if (allowed !== true) return { request_received: true };
+
+  const { error: resetError } = await authClient.auth.resetPasswordForEmail(normalizedEmail, { redirectTo });
+  if (resetError) throw resetError;
+  return { request_received: true };
+}
+
 function decodeBase64(value, label) {
   if (typeof value !== 'string' || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(value)) {
     throw new Error(`Envelope pemulihan ${label} tidak valid.`);

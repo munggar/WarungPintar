@@ -459,22 +459,19 @@ async function submitAuth(form) {
 async function beginPasswordReset() {
   const value = await formModal({
     title: 'Atur ulang kata sandi',
-    note: 'Verifikasi dilakukan dengan kunci pemulihan. Tidak ada tautan atau verifikasi email.',
+    note: 'Tautan pemulihan akan dikirim ke email akun. Kunci pemulihan hanya digunakan untuk membuka data toko terenkripsi, bukan untuk mengubah kata sandi akun.',
     fields: [
       { name: 'email', label: 'Email akun', type: 'email', required: true },
-      { name: 'recovery', label: 'Kunci pemulihan', required: true, autocomplete: 'off' },
-      { name: 'password', label: 'Kata sandi baru', type: 'password', required: true, minlength: 8 },
-      { name: 'confirmPassword', label: 'Ulangi kata sandi baru', type: 'password', required: true, minlength: 8 },
     ],
-    submit: 'Reset kata sandi',
+    submit: 'Kirim tautan pemulihan',
   });
   if (!value) return;
-  if (value.password !== value.confirmPassword) throw new Error('Kata sandi baru belum sama.');
-  await supabase.resetPassword(value.email.trim().toLowerCase(), value.recovery.trim(), value.password);
+  const email = value.email.trim().toLowerCase();
+  await supabase.resetPassword(email);
   S.authMode = 'login';
-  S.authEmail = value.email.trim().toLowerCase();
-  renderAuth('Jika email dan kunci pemulihan cocok, kata sandi telah diperbarui. Silakan masuk dengan kata sandi baru; bila gagal, periksa kembali email dan kunci pemulihan.');
-  toast('Jika email dan kunci pemulihan cocok, permintaan reset telah diproses.');
+  S.authEmail = email;
+  renderAuth('Jika email terkait akun tersedia, tautan pemulihan telah dikirim. Periksa kotak masuk dan folder spam. Setelah membuka tautan, atur kata sandi baru; kunci pemulihan tetap diperlukan untuk membuka data toko terenkripsi.');
+  toast('Jika email terkait akun tersedia, tautan pemulihan telah dikirim.');
 }
 
 function toast(msg, type = 'ok') {

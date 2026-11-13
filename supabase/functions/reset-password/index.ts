@@ -1,14 +1,10 @@
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
 import {
-  DUMMY_RECOVERY_ENVELOPE,
-  emailRateLimitFingerprint,
-  isRecoveryCode,
   normalizeEmail,
-  verifyRecoveryEnvelope,
+  requestPasswordResetEmail,
 } from '../_shared/reset-security.js';
 
 const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-const ACCEPTED_RESPONSE = { request_received: true };
 
 function responseHeaders(request: Request) {
   const origin = request.headers.get('Origin') ?? '';
@@ -43,9 +39,11 @@ Deno.serve(async (request) => {
   }
 
   const url = Deno.env.get('SUPABASE_URL');
+  const anonKey = Deno.env.get('SUPABASE_ANON_KEY');
   const serviceKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY');
+  const appUrl = Deno.env.get('APP_URL');
   const rateLimitSecret = Deno.env.get('RESET_RATE_LIMIT_SECRET');
-  if (!url || !serviceKey || !rateLimitSecret || rateLimitSecret.length < 32) {
+  if (!url || !anonKey || !serviceKey || !appUrl || !rateLimitSecret || rateLimitSecret.length < 32) {
     return Response.json({ error: 'Layanan pemulihan belum dapat diproses.' }, { status: 503, headers });
   }
 
@@ -56,47 +54,31 @@ Deno.serve(async (request) => {
     }
 
     const email = normalizeEmail(payload.email);
-    const recoveryCode = String(payload.recoveryCode ?? '').trim();
-    const password = String(payload.password ?? '');
-    if (!EMAIL_PATTERN.test(email) || email.length > 254
-      || password.length < 8 || password.length > 128
-      || recoveryCode.length > 48) {
-      return Response.json({ error: 'Lengkapi email, kunci pemulihan, dan kata sandi baru yang valid.' }, { status: 400, headers });
+    if (!EMAIL_PATTERN.test(email) || email.length > 254) {
+      return Response.json({ error: 'Alamat email tidak valid.' }, { status: 400, headers });
+    }
+    if (payload.recoveryCode != null || payload.password != null) {
+      return Response.json(
+        { error: 'Pemulihan kata sandi harus dilanjutkan melalui tautan yang dikirim ke email.' },
+        { status: 400, headers },
+      );
     }
 
-    const admin = createClient(url, serviceKey, { auth: { persistSession: false } });
-    const emailHash = await emailRateLimitFingerprint(email, rateLimitSecret);
-    const { data: allowed, error: rateLimitError } = await admin.rpc(
-      'consume_password_reset_attempt',
-      { p_email_hash: emailHash },
-    );
-    if (rateLimitError) throw rateLimitError;
-    if (allowed !== true) return Response.json(ACCEPTED_RESPONSE, { status: 202, headers });
-
-    const { data: targets, error: targetError } = await admin.rpc(
-      'resolve_password_reset_target',
-      { p_email: email },
-    );
-    if (targetError) throw targetError;
-    const target = Array.isArray(targets) ? targets[0] : null;
-    const envelope = target
-      ? {
-          salt: target.recovery_salt,
-          iv: target.recovery_iv,
-          wrapped: target.recovery_wrapped_key,
-        }
-      : DUMMY_RECOVERY_ENVELOPE;
-    const codeForVerification = isRecoveryCode(recoveryCode) ? recoveryCode : '0'.repeat(40);
-    const validRecoveryKey = await verifyRecoveryEnvelope(envelope, codeForVerification);
-
-    if (target && validRecoveryKey) {
-      const { error: passwordError } = await admin.auth.admin.updateUserById(target.user_id, { password });
-      if (passwordError) throw passwordError;
-    }
-
-    return Response.json(ACCEPTED_RESPONSE, { status: 202, headers });
+    const rateLimiter = createClient(url, serviceKey, { auth: { persistSession: false } });
+    const authClient = createClient(url, anonKey, { auth: { persistSession: false } });
+    const result = await requestPasswordResetEmail({
+      rateLimiter,
+      authClient,
+      email,
+      rateLimitSecret,
+      redirectTo: new URL(appUrl).origin,
+    });
+    return Response.json(result, { status: 202, headers });
   } catch (error) {
-    console.error('Pemulihan kata sandi gagal diproses:', error);
+    console.error(
+      'Permintaan email pemulihan gagal diproses:',
+      error instanceof Error ? error.name : 'Kesalahan tidak diketahui.',
+    );
     return Response.json(
       { error: 'Permintaan pemulihan belum dapat diproses. Coba kembali nanti.' },
       { status: 503, headers },
