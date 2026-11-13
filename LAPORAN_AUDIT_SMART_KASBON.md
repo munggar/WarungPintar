@@ -829,3 +829,457 @@ Addendum ini mencatat perubahan setelah verifikasi database staging di atas. Bag
 - Production tidak disentuh. Output staging terpisah dari output/build source production. Aplikasi browser tetap membutuhkan RLS/backend untuk keamanan data; Supabase Publishable Key bukan secret.
 - Hasil pemeriksaan frontend ini **tidak** mengatasi blocker sebelumnya: Edge Functions/Auth staging belum diverifikasi melalui HTTP; ledger finansial server-side belum diimplementasikan; transaksi tunai dan histori tetap dapat berasal dari input pemilik. Smart Kasbon tetap Rule-Based, bukan Machine Learning, dan bukan jaminan kemampuan bayar.
 - Status keseluruhan: **BELUM SIAP DIGUNAKAN PENGGUNA NYATA / BELUM TERVERIFIKASI SIAP PRODUKSI**. Validasi hosting masih memerlukan pembuatan service staging terpisah, pemasangan environment variables pada Render, deployment manual, dan pengujian HTTPS/browser serta alur Auth/Edge.
+
+## Addendum — Investigasi Frontend Staging dan Pengujian Runtime (13 November 2026)
+
+Addendum ini melengkapi riwayat audit sebelumnya tanpa menghapus hasil historis. Pemeriksaan dilakukan pada branch `staging`, commit dasar `0d718692c51c830d8a4c5b3a7f0933c5fce6683d`. Tidak ada commit, push, deployment, atau operasi tulis ke Supabase dalam pemeriksaan ini. Semua request ke Supabase hanya membaca health/settings atau memeriksa ketersediaan route Edge Function.
+
+### 1. Environment dan batas pemeriksaan
+
+- Frontend staging yang diperiksa: `https://warungpintar-frontend-staging.onrender.com`.
+- Project staging yang diperiksa: `unkmykhwddwhbtuioqrg`. Nilai project ref dan format publishable key pada runtime live diverifikasi tanpa menampilkan nilai key.
+- Environment lokal: Windows, Node.js/npm. Build lokal menggunakan publishable-key placeholder, bukan key Render.
+- Tidak ada variabel environment dengan nama `SUPABASE`, `RENDER`, `DATABASE`, atau `POSTGRES` tersedia pada proses pemeriksaan. `supabase`, `psql`, dan `deno` tidak tersedia pada PATH. Docker CLI tersedia, tetapi Docker Engine gagal dihubungi melalui `dockerDesktopLinuxEngine` (HTTP 500 dari Docker API).
+- Build dan tes lokal tidak menggunakan `js/config.local.js`; file konfigurasi lokal tidak disalin ke artefak.
+
+### 2. Investigasi 404 dan akar penyebab
+
+`index.html` memuat `js/app.js` sebagai ES module. `app.js` memiliki import lokal ke `db.js`, `logic.js`, `xlsx.js`, `crypto.js`, `supabase.js`, `cloud-sync.js`, `currency.js`, `receipt.js`, dan `config.js`. Modul-modul itu kemudian mengimpor `db.js`, `logic.js`, `crypto.js`, `supabase.js`, dan runtime config. `config.js` juga memiliki import runtime `config.runtime.js`; `config.local.js` hanya fallback lokal yang dijalankan pada localhost dan sengaja tidak disertakan pada staging.
+
+Pada source sebelum perubahan, `copyFrontend` hanya menyalin file `.js` yang berada langsung di direktori `js/`, sementara `verifyOutput` hanya mewajibkan beberapa file inti. Karena `logic.js`, `supabase.js`, dan `config.js` berada langsung di direktori itu dan tidak masuk daftar pengecualian, kode build yang diperiksa **seharusnya menyalin ketiga file tersebut**. Karena itu bukti yang tersedia tidak cukup untuk menyatakan bahwa implementasi lama secara pasti menghilangkan tiga file tersebut.
+
+404 yang dilaporkan tidak dapat direproduksi saat pemeriksaan:
+
+- Halaman Render saat ini menampilkan halaman masuk dan badge `STAGING`.
+- Semua 28 path asset dari artefak lokal saat ini merespons HTTP 200 pada Render, termasuk seluruh 13 asset JavaScript; pemeriksaan terpisah untuk 12 modul/entry JavaScript juga semuanya HTTP 200.
+- Audit teks pada 17 asset live menemukan URL, key, dan project ref production tidak ada. Runtime live menunjuk ke project staging yang disetujui.
+- Browser setelah reload tidak mencatat console error, page error, request gagal, atau response HTTP 4xx/5xx.
+
+Dengan demikian akar penyebab historis 404 tetap **tidak dapat dipastikan** dari bukti yang tersedia; deployment lama, publish directory, branch service, atau cache lama tidak dapat dibedakan tanpa log/artifact deployment yang gagal. README sebelumnya menyarankan branch `main`, tidak konsisten dengan branch staging yang diminta; petunjuk itu telah dikoreksi menjadi `staging`. Perubahan dokumentasi ini tidak membuktikan branch yang sedang dipakai Render.
+
+Risiko build yang dapat dibuktikan adalah tidak adanya penyalinan subdirektori JS secara rekursif dan tidak adanya pemeriksaan graph import lokal. Build dapat lolos meskipun modul baru ditempatkan pada subfolder atau asset yang dirujuk tidak tersedia. Perbaikan berikut mencegah kondisi tersebut lolos secara diam-diam.
+
+### 3. Perbaikan dan file yang diubah
+
+| Path | Perubahan |
+|---|---|
+| `scripts/build-render-staging.mjs` | Menyalin pohon modul JavaScript secara rekursif sambil tetap mengecualikan konfigurasi lokal, file source scanner, dan runtime config hasil generate. Pemeriksa output kini memeriksa entrypoint module HTML, import/re-export statis, dynamic import literal, URL module relatif ke `import.meta.url`, serta asset lokal dari HTML, manifest, CSS (`url()`/`@import`), dan daftar precache service worker. Import dinamis `config.local.js` di `js/config.js` hanya dikecualikan sebagai fallback localhost; runtime staging wajib memiliki environment, URL, ref, format publishable key, dan origin yang valid. Pemindaian artefak menolak URL/key/ref production dan pola backend credential. |
+| `tests/staging-build.test.js` | Menambah tes penyalinan JS nested, sanitasi konfigurasi production, pemeriksaan graph import rekursif, runtime staging yang tidak cocok, dan broken asset HTML/CSS. Fixture mencakup fallback `config.local.js` yang opsional pada localhost. |
+| `README.md` | Memperbaiki petunjuk branch service Render dari `main` menjadi `staging` dan mendokumentasikan penyalinan/verifikasi dependency rekursif serta pengecualian fallback localhost. |
+| `LAPORAN_AUDIT_SMART_KASBON.md` | Addendum ini merekam bukti aktual dan blocker yang masih terbuka. |
+
+`package.json` dan `package-lock.json` tidak berubah dalam pekerjaan ini. Dependency esbuild yang diperlukan sudah tercatat sebelumnya.
+
+### 4. Hasil pengujian frontend
+
+| Test/pemeriksaan | Expected result | Actual result | Status |
+|---|---|---|---|
+| `npm ci` | Instalasi bersih sesuai lockfile | Exit 0; 7 package ditambahkan, audit melaporkan 0 vulnerability. npm memberi warning bahwa postinstall esbuild belum disetujui oleh kebijakan `allow-scripts`; JavaScript API tetap berhasil menggunakan binary platform yang terpasang. | **PASS** |
+| `npm test` | Seluruh suite lulus | 53 tes, 53 PASS, 0 FAIL, 0 skipped. Termasuk validasi environment, penyalinan rekursif, pemblokiran import/asset yang hilang, sanitasi config, dan tes bisnis lokal. | **PASS** |
+| `npm run build` | Bundle scanner dapat dibuat | Exit 0; bundle scanner 473.9 kB. Hash file tracked `js/barcode-scanner.js` sama sebelum dan setelah build. | **PASS** |
+| `npm run build:staging` | Artefak `dist-staging` valid untuk project staging | Exit 0; build ID `e970008c0216`; memakai placeholder key lokal. `verifyStagingOutput` memeriksa graph JS, asset statis, runtime config, dan pola credential. | **PASS** |
+| Syntax JavaScript output | Semua file JS dapat diparse | `node --check` berhasil untuk 13 file JavaScript di `dist-staging`. | **PASS** |
+| Audit artefak output | Modul, CSS, gambar, dan runtime tersedia; tidak ada config production/local | 28 file: 13 JS, 1 CSS, 11 image, serta file pendukung. Seluruh modul yang diimpor tersedia. URL/key/ref production dan pola backend credential tidak ditemukan. `config.runtime.js` berisi target staging dan placeholder yang cocok dengan input build; nilai key tidak dicatat. | **PASS** |
+| HTTP server lokal dari `dist-staging` | Semua path artefak menjawab 200 | Server lokal sementara melayani 28/28 asset dengan HTTP 200. Server dihentikan setelah pemeriksaan. | **PASS** |
+| Browser lokal staging | Halaman aktif, tanpa error, responsive | Login ter-render; splash tersembunyi setelah `app-ready`. Tidak ada console/page/network error. Pada viewport 390, 768, dan 1280 px tidak ada horizontal overflow. | **PASS** |
+| Browser Render live | Entry dan asset yang diperiksa tersedia | Halaman masuk dan badge `STAGING` terlihat; 28/28 path asset dari artefak saat ini merespons 200. Tidak ada console/page/request/HTTP error saat reload. Viewport 390, 768, dan 1280 px tidak menunjukkan horizontal overflow. | **PASS** |
+
+Audit lokal menggunakan placeholder; audit live memeriksa key hanya secara format dan tidak menampilkan atau menyimpan nilainya. Pemeriksaan ini bukan deployment baru.
+
+### 5. Registrasi dan autentikasi
+
+| Skenario | Expected result | Actual result | Status |
+|---|---|---|---|
+| Submit form registrasi kosong | Browser menolak field wajib sebelum request | Form `checkValidity()` mengembalikan false; field email, toko, undangan, password, dan konfirmasi ditandai wajib. | **PASS — validasi UI saja** |
+| Format email/invitation/password salah | Browser menolak format dan panjang yang tidak valid | Email tidak valid, invite code bukan 64 hex, dan password pendek ditandai invalid. | **PASS — validasi UI saja** |
+| Password dan konfirmasi berbeda | Tidak mengirim request register | UI menampilkan pesan bahwa password belum sama; listener mencatat 0 request ke Supabase. | **PASS — validasi UI saja** |
+| Submit recovery kosong | Menolak sebelum reset diproses | Dialog menampilkan `Email akun wajib diisi.` | **PASS — validasi UI saja** |
+| Verifikasi email | Tidak mensyaratkan tautan konfirmasi | Endpoint Auth staging `/auth/v1/settings` merespons 200 dengan `mailer_autoconfirm=true` dan email provider aktif. | **PASS — setting Auth teramati** |
+| Registrasi owner valid/duplikat | Akun staging dibuat atau duplikat ditolak sesuai aturan | `register-owner` merespons HTTP 404; tidak ada test invite code atau akun testing yang diberikan. Tidak dilakukan bypass registrasi aplikasi. | **BLOCKED** |
+| Login valid/salah/tidak dikenal, logout, session persistence | Perilaku Auth nyata dapat diverifikasi | Memerlukan akun testing khusus; Edge Function pendukung tidak tersedia dan tidak ada akun testing yang dapat dipakai. | **BLOCKED** |
+| Recovery valid, enumeration, persistent rate limit | Respons seragam dan rate limit terbukti | `reset-password` merespons HTTP 404; tidak ada akun atau recovery key testing. | **BLOCKED** |
+
+GET tanpa mutasi ke lima endpoint staging—`register-owner`, `reset-password`, `smart-kasbon`, `invite-assistant`, dan `assistant-access`—semuanya merespons HTTP 404. Auth health merespons HTTP 200. Ini membuktikan Auth service merespons, tetapi fungsi aplikasi belum tersedia pada runtime staging yang diperiksa.
+
+### 6. Smart Kasbon dan keamanan
+
+Seluruh skenario Smart Kasbon end-to-end berikut **BLOCKED**, bukan PASS: pengajuan, nominal invalid, limit/financial snapshot, duplikasi, persetujuan owner, otorisasi assistant/anon, pencairan, pembayaran parsial/pelunasan, idempotensi/replay, timeout/retry, compensation/void, concurrency, saldo/audit log, dan isolasi tenant. Fungsi `smart-kasbon` live merespons HTTP 404 dan tidak tersedia akun owner/assistant atau koneksi database testing.
+
+RLS/grants, JWT authorization, IDOR/cross-tenant, audit ledger, transaksi PostgreSQL, serta race/concurrency tidak diuji ulang pada run ini. Addendum sebelumnya mencatat 5 migration staging dan 55 assertion pgTAP PASS pada saat pengujian sebelumnya; hasil itu **historis**, bukan pengujian ulang pada tanggal addendum ini. Pada pemeriksaan sekarang tidak ada Supabase CLI, `psql`, Deno, variabel koneksi staging, atau Docker Engine yang berfungsi untuk mengulangnya. Tidak ada permintaan tulis ke Supabase.
+
+Tidak ada skrip `lint` pada `package.json`; karena itu lint tidak dapat dijalankan. Syntax check dan browser automation di atas bukan pengganti lint atau E2E authenticated.
+
+### 7. Risiko tersisa dan status
+
+- **CRITICAL — runtime fitur backend tidak tersedia:** lima Edge Function staging yang diperiksa mengembalikan 404. Pendaftaran owner, recovery, dan Smart Kasbon tidak dapat diuji end-to-end dan beberapa fitur tidak dapat berjalan melalui runtime saat ini.
+- **HIGH — autentikasi dan pengujian hak akses belum terbukti:** tidak ada akun owner/assistant/dua toko dan tidak ada HTTP test menggunakan JWT.
+- **HIGH — integritas database belum diretest pada run ini:** tidak ada koneksi PostgreSQL staging/tooling lokal yang berfungsi.
+- **MEDIUM — insiden 404 awal tidak dapat direkonstruksi:** current live merespons 200 untuk semua asset yang diperiksa; log/artifact deployment yang gagal tidak tersedia.
+
+**Status akhir: BELUM SIAP — ditemukan blocker kritis.** Frontend staging yang saat ini diperiksa berhasil memuat halaman login dan asset statis, tetapi hasil itu tidak membuktikan registrasi, Auth, Smart Kasbon, transaksi, RLS, atau isolasi tenant siap. Tidak ada dasar untuk menyatakan aplikasi siap digunakan pengguna nyata.
+
+Untuk melanjutkan pengujian authenticated diperlukan deployment Edge Functions pada **staging** dengan izin eksplisit, akun owner/assistant dan undangan khusus testing, serta koneksi database staging/tooling yang dapat diakses melalui environment aman. Jangan mengirim service-role key, password, invite code, atau recovery key ke laporan atau chat. Akses Render diperlukan hanya bila harus membuktikan konfigurasi branch/publish directory service yang menghasilkan deployment lama.
+
+## Addendum — Diagnosis Edge Functions Staging dan Regression (13 November 2026)
+
+Pemeriksaan lanjutan dilakukan tanpa mengubah source aplikasi, database, atau konfigurasi Supabase. Seluruh pemeriksaan HTTP menggunakan host project staging yang eksplisit, `https://unkmykhwddwhbtuioqrg.supabase.co`; konfigurasi frontend live hanya dibaca untuk memastikan project ref. Publishable key digunakan di memori sebagai header publik dan tidak dicetak, ditulis ke file, atau disimpan ke laporan.
+
+### 1. CLI, project target, dan konfigurasi
+
+- Branch tetap `staging`, HEAD `0d718692c51c830d8a4c5b3a7f0933c5fce6683d`.
+- `where.exe supabase` tidak menemukan Supabase CLI pada PATH. Karena CLI tidak tersedia, status autentikasi CLI **tidak dapat diperiksa**; ini bukan bukti bahwa sesi CLI login atau logout.
+- Tidak ada perintah deploy, login, secrets list, migration, atau operasi database yang dijalankan. Daftar remote secrets juga tidak dapat diperiksa tanpa akses Management API/CLI terautentikasi.
+- Runtime frontend live memuat project ref staging yang diminta. `GET /auth/v1/health` pada host tersebut menghasilkan HTTP 200.
+- `supabase/config.toml` menetapkan `verify_jwt = false` untuk `register-owner` dan `reset-password`, serta `verify_jwt = true` untuk `smart-kasbon`. Tidak ada override untuk `invite-assistant` dan `assistant-access`; keduanya menggunakan default Supabase yaitu verifikasi JWT aktif.
+
+### 2. Function source dan runtime variables yang dibutuhkan
+
+Ada lima function dengan source `index.ts`. `supabase/functions/_shared/reset-security.js` adalah helper, bukan function. Direktori `mailtrap-signup` tidak memiliki entrypoint/source function, sehingga tidak ada function tersebut yang dapat dideploy dari working tree ini.
+
+| Function | Runtime variables yang dibaca source | Dependency lain yang tampak pada source |
+|---|---|---|
+| `register-owner` | `SUPABASE_URL`, `SUPABASE_ANON_KEY`, `SUPABASE_SERVICE_ROLE_KEY`, `APP_URL` | RPC reservasi/penyelesaian/pelepasan undangan pendaftaran; Supabase Auth signup dan session tanpa konfirmasi email. |
+| `reset-password` | `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `APP_URL`, `RESET_RATE_LIMIT_SECRET` (minimal 32 karakter); tidak membaca anon key | RPC rate limit dan pencarian target recovery; Admin Auth update password. |
+| `smart-kasbon` | `SUPABASE_URL`, `SUPABASE_ANON_KEY`, `SUPABASE_SERVICE_ROLE_KEY`, `APP_URL` untuk origin CORS | `smart_kasbon_transaction`, `smart_kasbon_evaluate`, tabel dan policy Smart Kasbon. |
+| `invite-assistant` | `SUPABASE_URL`, `SUPABASE_ANON_KEY`, `SUPABASE_SERVICE_ROLE_KEY`, `APP_URL` | Membership dan undangan toko, Admin Auth invite; pengiriman email bergantung pada konfigurasi provider Auth Supabase, bukan variabel SMTP yang dibaca langsung oleh function. |
+| `assistant-access` | `SUPABASE_URL`, `SUPABASE_ANON_KEY`, `SUPABASE_SERVICE_ROLE_KEY`, `APP_URL` untuk origin CORS | Membership, key envelope, dan Admin Auth lookup user. |
+
+Nama-nama di atas berasal dari pembacaan source; ketersediaan nilainya pada runtime staging **tidak terverifikasi**. Tidak ada nilai secret yang dibaca atau ditampilkan. Function pendaftaran, recovery, dan kasbon juga membutuhkan migration/RPC terkait yang sudah diterapkan pada staging; status migration remote tidak diperiksa pada run ini.
+
+### 3. Probe HTTP staging
+
+Setiap function diuji dengan preflight `OPTIONS`, `GET` tanpa JWT, dan `POST` dengan JWT dummy tidak valid. Body POST untuk endpoint publik berisi data kosong/tidak valid sehingga, seandainya route hidup, tidak dapat menyelesaikan pendaftaran atau mengonsumsi recovery rate-limit; untuk endpoint yang memerlukan JWT, token dummy tidak dapat mengotorisasi tindakan. Header CORS menunjukkan tidak ada `Access-Control-Allow-Origin` staging karena router tidak menemukan route.
+
+| Function | OPTIONS | Tanpa JWT (GET) | JWT tidak valid (POST) | Hasil |
+|---|---:|---:|---:|---|
+| `register-owner` | 404 JSON `NOT_FOUND` | 404 JSON `NOT_FOUND` | 404 JSON `NOT_FOUND` | Route tidak ditemukan |
+| `reset-password` | 404 JSON `NOT_FOUND` | 404 JSON `NOT_FOUND` | 404 JSON `NOT_FOUND` | Route tidak ditemukan |
+| `smart-kasbon` | 404 JSON `NOT_FOUND` | 404 JSON `NOT_FOUND` | 404 JSON `NOT_FOUND` | Route tidak ditemukan |
+| `invite-assistant` | 404 JSON `NOT_FOUND` | 404 JSON `NOT_FOUND` | 404 JSON `NOT_FOUND` | Route tidak ditemukan |
+| `assistant-access` | 404 JSON `NOT_FOUND` | 404 JSON `NOT_FOUND` | 404 JSON `NOT_FOUND` | Route tidak ditemukan |
+
+Body error router untuk kelima function: `Requested function was not found`. Auth health staging merespons 200. Ini bukti yang lebih spesifik daripada sekadar 404 generik: project host/ref yang dituju aktif, tetapi slug function tidak ditemukan oleh router Edge Functions project tersebut. Bukti ini konsisten dengan function belum dideploy ke project staging atau dideploy dengan nama/project lain. Tanpa daftar deployment Management API/CLI, kedua kemungkinan itu belum dapat dibedakan. Request tidak mencapai handler, sehingga probe ini **tidak** membuktikan aturan JWT, role, atau CORS di dalam source function aman.
+
+| Pemeriksaan | Expected | Actual | Status |
+|---|---|---|---|
+| Project target | Project ref staging yang disetujui | Ref runtime dan host request cocok; Auth health 200 | **PASS** |
+| CLI dan autentikasi | CLI tersedia dan status login dapat diverifikasi | CLI tidak ditemukan pada PATH; auth tidak dapat diperiksa | **BLOCKED** |
+| Status route lima function | Router mengenali slug function | Semua membalas `NOT_FOUND: Requested function was not found` | **FAIL — runtime route tidak tersedia** |
+| CORS preflight | Route memberi respons CORS function yang tepat | Semua `OPTIONS` 404 tanpa allow-origin staging | **BLOCKED oleh route 404** |
+| Anonymous/invalid JWT dan role | Handler memberi status auth/role sesuai desain | Seluruh request berhenti di router 404; tidak ada JWT dummy valid atau akun staging | **NOT TESTED pada handler** |
+| Database staging/data dummy | Tanpa mutasi atau transaksi nyata | Tidak ada migration/RPC/write database yang dijalankan; tidak ada data dummy dibuat | **PASS — tidak ada perubahan oleh audit** |
+| Deployment function | Kelima function tersedia di staging | Tidak ada deploy; remote router melaporkan kelima slug tidak ditemukan | **NOT DEPLOYED/NOT VERIFIED** |
+
+### 4. Regression test sesi ini
+
+| Pemeriksaan | Hasil | Status |
+|---|---|---|
+| `npm test` | 53 PASS, 0 FAIL, 0 skipped | **PASS** |
+| `npm run build:staging` | Berhasil; output `dist-staging`, build ID `f812f2f64794`; konfigurasi memakai placeholder non-rahasia dan identitas Render staging | **PASS** |
+| JavaScript syntax check | 13/13 file JS output lulus `node --check` | **PASS** |
+| Audit artifact | 28 file (13 JS, 1 CSS, 11 image, file pendukung); runtime ref/key-format valid; tidak ada ref/URL/key production, backend credential marker, konfigurasi lokal, folder Supabase/tests, atau node_modules | **PASS** |
+| `git diff --check` | Tidak ada whitespace error | **PASS** |
+
+Artefak lokal hasil placeholder dibersihkan setelah audit. Tes regresi ini tidak menguji handler Edge Function karena route remote tetap 404.
+
+### 5. Perubahan, efek samping, dan status akhir
+
+Pada tahap lanjutan ini tidak ada perubahan source, konfigurasi, deployment, atau database. Hanya laporan ini yang diperbarui. Tidak ada akun, undangan, transaksi, pembayaran, atau data dummy yang dibuat; tidak ada transaksi yang perlu dikompensasi. Perubahan lokal dari pekerjaan sebelumnya tetap belum di-commit/push. File `supabase/.temp/cli-latest` dan satu file untracked lain tetap dipertahankan tanpa perubahan.
+
+Untuk membedakan function belum dideploy dari deployment ke project lain dan melanjutkan deploy aman, diperlukan Supabase CLI yang tersedia serta terautentikasi, atau akses Management API yang sudah disediakan melalui environment aman. Sebelum deploy harus diverifikasi secret staging yang dibutuhkan—khususnya `APP_URL` dan `RESET_RATE_LIMIT_SECRET`—tanpa menampilkan nilainya; secret bawaan Supabase juga perlu dipastikan tersedia. Tidak perlu mengirim token atau secret melalui chat. Setelah itu diperlukan akun owner/assistant dan data uji khusus staging untuk pengujian JWT, role, tenant, dan E2E.
+
+**Status akhir: BELUM SIAP DIGUNAKAN PENGGUNA NYATA.** Frontend staging dan regresi lokal lulus, tetapi kelima Edge Function tidak ditemukan oleh router staging, dan Auth, otorisasi, database, transaksi, CORS function, serta E2E belum terbukti. Tidak ada deployment Supabase yang dilakukan.
+
+## Addendum — CLI Staging dan Ketersediaan Custom Secrets (13 November 2026)
+
+### Pemeriksaan CLI dan target
+
+- CLI tidak tersedia sebagai perintah global pada PATH, tetapi `npx --yes supabase --version` berhasil menjalankan Supabase CLI versi `3.1.0` dari cache npx. `package.json` dan `package-lock.json` tidak berubah.
+- Perintah remote yang dijalankan berikut semuanya menyertakan project ref staging secara eksplisit:
+  - `npx --yes supabase functions list --project-ref unkmykhwddwhbtuioqrg`
+  - `npx --yes supabase secrets list --project-ref unkmykhwddwhbtuioqrg`
+- Kedua query berakhir dengan exit code 0; ini memverifikasi CLI dapat mengakses query read-only yang dibatasi ke project staging. Tidak ada token yang dibaca atau dicetak. Tidak perlu meminta login interaktif.
+- Output `functions list` tidak memuat satu pun dari lima slug yang diminta. Pemeriksaan HTTP sebelumnya untuk host staging yang sama memberi `NOT_FOUND: Requested function was not found` untuk kelima slug. Dengan bukti gabungan ini, function belum terdaftar pada project staging yang dituju.
+- Percobaan tambahan `functions list --output json` tidak menghasilkan JSON yang dapat diparse; hasil itu tidak dipakai untuk menyimpulkan daftar function. Listing standar dan probe HTTP tetap konsisten.
+- Tidak ada perintah yang menargetkan project production, dan tidak ada link, deploy, migration, atau operasi database.
+
+### Ketersediaan secrets
+
+`supabase secrets list` dijalankan dengan output hanya diproses di memori; nilai/digest tidak ditampilkan atau ditulis. Daftar custom secrets tidak memuat:
+
+- `APP_URL`
+- `RESET_RATE_LIMIT_SECRET`
+
+Kedua nama tersebut karena itu **belum tersedia sebagai custom secrets staging**. `APP_URL` digunakan oleh kelima source function untuk origin CORS/redirect; untuk `reset-password`, `RESET_RATE_LIMIT_SECRET` juga wajib dan source mensyaratkan panjang minimum 32 karakter. `SUPABASE_URL`, `SUPABASE_ANON_KEY`, dan `SUPABASE_SERVICE_ROLE_KEY` adalah variabel bawaan yang biasanya disediakan runtime Supabase; values maupun keberadaannya di runtime belum diverifikasi melalui function karena route belum dideploy. Jangan mengisi nilai production untuk staging.
+
+Karena `APP_URL` belum terdaftar dan diperlukan untuk origin/redirect staging, **tidak ada dari lima function yang dideploy**. `reset-password` juga tetap terblokir oleh `RESET_RATE_LIMIT_SECRET` yang belum terdaftar. Tidak ada secret yang dibuat atau diubah oleh pemeriksaan ini.
+
+### Tindakan yang diperlukan sebelum deploy
+
+Pemilik project perlu menambahkan custom secrets khusus staging melalui Supabase Dashboard pada project dengan ref `unkmykhwddwhbtuioqrg` → **Edge Functions → Secrets**:
+
+1. `APP_URL` dengan origin frontend staging `https://warungpintar-frontend-staging.onrender.com`.
+2. `RESET_RATE_LIMIT_SECRET` dengan nilai acak khusus staging sekurang-kurangnya 32 karakter; buat melalui password manager atau generator lokal tepercaya dan jangan kirim nilainya melalui chat atau laporan.
+
+Sesudah secrets disimpan, verifikasi kembali **nama secret saja** dengan `npx supabase secrets list --project-ref unkmykhwddwhbtuioqrg`. Nilai secrets tidak perlu dibagikan. Baru setelah itu deploy lima slug source menggunakan `--project-ref unkmykhwddwhbtuioqrg`, satu per satu, lalu jalankan ulang HTTP checks. Langkah deploy dihentikan di sini sesuai instruksi agar function yang membutuhkan secret yang belum ada tidak dideploy.
+
+**Status addendum: deploy BLOCKED menunggu tindakan pemilik project untuk menambahkan dua custom secrets staging.** Status kesiapan tetap **BELUM SIAP DIGUNAKAN PENGGUNA NYATA**. Data database staging tidak berubah dan tidak ada data dummy yang tersisa.
+
+## Addendum — Secrets Tersedia, Link Staging, dan Deploy Terblokir Consent (13 November 2026)
+
+### Pemeriksaan secrets dan link lokal
+
+- Dengan `npx --yes supabase secrets list --project-ref unkmykhwddwhbtuioqrg`, kedua nama custom secret yang sebelumnya belum ada kini terdaftar: `APP_URL` dan `RESET_RATE_LIMIT_SECRET`. Output hanya diproses di memori; nilai/digest tidak dibaca, ditampilkan, atau dicatat.
+- CLI tetap dapat menjalankan query project-scoped staging. Versi CLI npx adalah 3.1.0; dependency manifest aplikasi tidak berubah.
+- Pengguna menyetujui link lokal dan deploy staging. `npx --yes supabase link --project-ref unkmykhwddwhbtuioqrg` berhasil. Target yang ditulis oleh CLI adalah project staging; pemeriksaan lokal setelahnya memastikan `.temp/project-ref` sama dengan ref staging.
+- Sebelum link, metadata lokal `.temp/project-ref` menunjuk project production. Tidak ada command yang memakai ref production atau operasi remote ke production. Setelah link staging, file metadata `.temp` yang berubah dipindai tanpa menampilkan isinya: metadata terkait berisi ref staging, tidak berisi ref production atau pola kredensial yang diperiksa.
+- Link lokal menambah perubahan working tree pada `supabase/.temp/linked-project.json`, `pooler-url`, `postgres-version`, `project-ref`, `storage-migration`, dan `storage-version`. Perubahan ini adalah metadata lokal hasil link staging, bukan migration database. `supabase/.temp/cli-latest` dan satu file untracked lain yang sudah ada tetap dipertahankan.
+
+### Hasil percobaan deploy
+
+Perintah yang dicoba untuk setiap nama function adalah:
+
+`npx --yes supabase functions deploy <nama-function> --project-ref unkmykhwddwhbtuioqrg --use-api`
+
+Deploy dicoba untuk `register-owner`, `reset-password`, `smart-kasbon`, `invite-assistant`, dan `assistant-access`. Percobaan awal tertahan karena project bukan link lokal; setelah link staging dan persetujuan pengguna, retry untuk kelima function masih berhenti dengan **`HostedMutationConsentRequiredError` / consent deploy tidak tersedia pada command runner**. Exit status setiap command nonzero; CLI memblokir tindakan sebelum deploy. Tidak digunakan `--yes`, API alternatif, atau metode lain untuk melewati consent. Karena itu deploy **tidak berhasil** untuk kelima function.
+
+| Function | Hasil deploy | Bukti |
+|---|---|---|
+| `register-owner` | **BLOCKED** | CLI consent gate menghentikan command sebelum deploy |
+| `reset-password` | **BLOCKED** | CLI consent gate menghentikan command sebelum deploy |
+| `smart-kasbon` | **BLOCKED** | CLI consent gate menghentikan command sebelum deploy |
+| `invite-assistant` | **BLOCKED** | CLI consent gate menghentikan command sebelum deploy |
+| `assistant-access` | **BLOCKED** | CLI consent gate menghentikan command sebelum deploy |
+
+### Verifikasi runtime setelah percobaan
+
+Pengujian dilakukan kembali ke host project staging yang eksplisit setelah seluruh command deploy tertahan:
+
+| Endpoint/function | OPTIONS | GET tanpa JWT | POST JWT invalid | CORS origin staging |
+|---|---:|---:|---:|---|
+| Auth health | — | **200** | — | — |
+| `register-owner` | 404 JSON | 404 JSON | 404 JSON | Tidak tersedia |
+| `reset-password` | 404 JSON | 404 JSON | 404 JSON | Tidak tersedia |
+| `smart-kasbon` | 404 JSON | 404 JSON | 404 JSON | Tidak tersedia |
+| `invite-assistant` | 404 JSON | 404 JSON | 404 JSON | Tidak tersedia |
+| `assistant-access` | 404 JSON | 404 JSON | 404 JSON | Tidak tersedia |
+
+`functions list --project-ref unkmykhwddwhbtuioqrg` tidak mencantumkan satu pun slug target. Karena router tetap mengembalikan 404 dan preflight tidak menghasilkan header CORS, validasi JWT/role dan CORS di dalam handler belum tercapai. E2E Auth, registrasi, recovery, kasbon, pembayaran, idempotensi, isolasi tenant, integritas database, dan concurrency tetap **NOT TESTED**. Tidak ada akun valid, fixture dummy, atau JWT yang tersedia; tidak ada transaksi atau data dummy yang dibuat.
+
+### Blocker dan tindakan yang diperlukan
+
+Blocker saat ini bukan lagi nama custom secret, melainkan consent hosted mutation yang tidak dapat dipenuhi oleh runner command. Deployment perlu dijalankan secara interaktif pada terminal lokal setelah memastikan `npx supabase link --project-ref unkmykhwddwhbtuioqrg` (sudah diterapkan pada working tree ini) dan melihat konfirmasi target staging sebelum menyetujuinya. Jalankan satu function per command, tanpa menambahkan `--project-ref` production:
+
+```text
+npx supabase functions deploy register-owner --project-ref unkmykhwddwhbtuioqrg --use-api
+npx supabase functions deploy reset-password --project-ref unkmykhwddwhbtuioqrg --use-api
+npx supabase functions deploy smart-kasbon --project-ref unkmykhwddwhbtuioqrg --use-api
+npx supabase functions deploy invite-assistant --project-ref unkmykhwddwhbtuioqrg --use-api
+npx supabase functions deploy assistant-access --project-ref unkmykhwddwhbtuioqrg --use-api
+```
+
+Jangan menyetujui prompt bila target yang ditampilkan bukan `unkmykhwddwhbtuioqrg`. Setelah deploy interaktif berhasil, ulangi probe HTTP dan baru lanjutkan pengujian dengan akun/data dummy staging. Jangan masukkan secret ke command line, log, atau chat.
+
+**Status addendum: DEPLOY BLOCKED — memerlukan konfirmasi interaktif pada terminal pengguna.** Tidak ada deployment Supabase, migration, operasi database, atau data dummy pada tahap ini. Status kesiapan tetap **BELUM SIAP DIGUNAKAN PENGGUNA NYATA**.
+
+## Addendum — Audit Fungsional dan Keamanan Setelah Functions ACTIVE (13 November 2026)
+
+### 1. Bukti deployment, target, dan secrets
+
+- Query `npx --yes supabase functions list --project-ref unkmykhwddwhbtuioqrg` menunjukkan kelima function berstatus **ACTIVE**, versi 2, pada project `warungpintar-staging`. Target CLI melaporkan `environment: production`; ini adalah environment bernama production **di project ref staging**, bukan project utama `skvskjrhhekwvkwuxjec`. Semua request audit ini memakai ref staging secara eksplisit; tidak ada operasi terhadap project utama.
+- `verify_jwt=false` untuk `register-owner` dan `reset-password`; `verify_jwt=true` untuk `smart-kasbon`, `invite-assistant`, dan `assistant-access`.
+- `npx --yes supabase secrets list --project-ref unkmykhwddwhbtuioqrg` mencantumkan nama `APP_URL` dan `RESET_RATE_LIMIT_SECRET`. Nilai/digest tidak dibaca atau direkam. Variabel runtime bawaan Supabase yang dibaca source tidak diperiksa nilainya.
+- Tidak ada deploy function baru pada audit ini. Percobaan sebelumnya tertahan consent gate; status ACTIVE di atas berasal dari keadaan remote yang diamati, bukan hasil deploy oleh audit ini.
+
+### 2. Pengujian HTTP dan Auth
+
+Semua probe menggunakan konfigurasi runtime frontend staging dan header publishable key hanya di memori. Body invalid disusun agar tidak dapat menyelesaikan operasi aplikasi.
+
+| Function | Status remote | OPTIONS dari origin staging | GET | POST tanpa / JWT invalid | Validasi request aman | CORS origin tidak tepercaya |
+|---|---|---:|---:|---:|---|---|
+| `register-owner` | ACTIVE v2; JWT gateway nonaktif sesuai desain invite-based public signup | 200; `Access-Control-Allow-Origin` cocok dengan staging | 405 | 400 / 400 | Invite code berformat salah menghasilkan 403 dan pesan validasi; tidak mencapai RPC reservasi | 200, tidak merefleksikan origin asing |
+| `reset-password` | ACTIVE v2; JWT gateway nonaktif sesuai desain public recovery | 200; origin cocok | 405 | 400 / 400 | Input email/recovery/password kosong menghasilkan 400 sebelum rate-limit RPC | 403 |
+| `smart-kasbon` | ACTIVE v2; JWT gateway aktif | 200; origin cocok | 405 | 401 / 401 | Request tanpa atau dengan JWT invalid ditolak sebelum aksi bisnis | 200, tidak merefleksikan origin asing |
+| `invite-assistant` | ACTIVE v2; JWT gateway aktif | 200; origin cocok | 405 | 401 / 401 | Request tanpa atau dengan JWT invalid ditolak sebelum aksi undangan | 200, tidak merefleksikan origin asing |
+| `assistant-access` | ACTIVE v2; JWT gateway aktif | 200; origin cocok | 405 | 401 / 401 | Request tanpa atau dengan JWT invalid ditolak sebelum aksi anggota | 200, tidak merefleksikan origin asing |
+
+Auth health merespons HTTP 200. Auth settings merespons HTTP 200 dan `mailer_autoconfirm=true`. Pendaftaran owner valid, login, reset valid, pemeriksaan enumeration/rate-limit lintas akun, serta sesi **NOT TESTED** karena tidak ada akun/invitation/recovery key dummy yang tersedia. Request unauthenticated di atas tidak membuktikan kontrol role untuk owner atau assistant; tidak ada JWT valid yang tersedia.
+
+### 3. Business logic, tenant isolation, dan database
+
+- Tidak ada kasbon, pembayaran, undangan, akun, atau test data yang dibuat; tidak ada data untuk dikompensasi/dibersihkan.
+- Pengajuan kasbon, pembayaran sebagian/pelunasan, duplicate/idempotency, batas maksimum, dua toko, owner-vs-assistant, cross-tenant/IDOR, concurrency, rollback, dan konsistensi ledger **NOT TESTED** karena tidak tersedia akun/fixture dummy dan akses database yang berfungsi.
+- `npx --yes supabase migration list --project-ref unkmykhwddwhbtuioqrg` gagal dengan blocker autentikasi password database. Tidak ada migration yang dijalankan atau didorong. Pernyataan snapshot pengguna bahwa migration lokal/remote sinkron dicatat sebagai konteks, tetapi tidak dapat diverifikasi ulang pada run ini. Password tidak diminta atau ditampilkan.
+
+### 4. Frontend dan regression
+
+| Pemeriksaan | Hasil aktual | Status |
+|---|---|---|
+| Halaman Render staging | Judul `Warung Pintar - STAGING`, badge STAGING dan halaman login terlihat | **PASS — halaman login saja** |
+| Browser console/network saat reload | Tidak ada page error atau request gagal yang tertangkap | **PASS — sesi reload yang diamati** |
+| Layout viewport 390/768/1280 | `scrollWidth` sama dengan `clientWidth`; horizontal overflow tidak ada | **PASS** |
+| Navigasi ke form registrasi | Klik melalui Playwright dan browser click tool timeout pada elemen yang tampak visible/enabled; form tidak berubah | **BLOCKED — interaksi browser; bukan bukti kegagalan handler aplikasi** |
+| `npm test` | 53 PASS, 0 FAIL, 0 skipped | **PASS** |
+| `npm run build` | Scanner bundle 473.9 kB berhasil | **PASS** |
+| `npm run build:staging` | Berhasil; output `dist-staging`, build ID `f812f2f64794`, memakai placeholder lokal | **PASS** |
+| Audit artifact dan syntax | 28 file; 13 JS lolos `node --check`; staging runtime valid; tidak ada pola URL/ref/key production atau backend credential yang dicari; konfigurasi lokal/backend/tests tidak ikut | **PASS** |
+| `npm run config:check` | Environment staging dan project ref staging terdeteksi; publishable key tersedia | **PASS** |
+| Lint/type check | `npm run` tidak menyediakan lint/typecheck; Deno tidak digunakan untuk menjalankan checker | **NOT AVAILABLE / NOT RUN** |
+
+Artefak build lokal dibuat hanya dengan placeholder dan dibersihkan setelah pemeriksaan. Tidak ada perubahan source frontend/backend pada addendum ini.
+
+### 5. Temuan keamanan
+
+| ID | Severity | Temuan | Bukti/status |
+|---|---|---|---|
+| SEC-01 | **HIGH** | Recovery key vault yang dibagikan dengan assistant dapat dipakai untuk mengganti password akun owner bila penyerang mengetahui email owner; recovery key vault bukan faktor pemulihan akun yang terikat ke user tertentu. | **Dikonfirmasi dari source, belum diuji terhadap akun staging.** `reset-password` tidak mewajibkan JWT dan melakukan Admin Auth password update setelah recovery envelope target cocok. `resolve_password_reset_target` mengambil envelope berdasarkan email anggota toko. |
+
+Temuan SEC-01 berasal dari review source: `supabase/functions/reset-password/index.ts` pada bagian verifikasi envelope dan `updateUserById`, migration `supabase/migrations/202611130001_registration_and_recovery_security.sql` pada RPC target recovery, serta penggunaan recovery key bersama di UI/assistant. Perbaikan yang disarankan adalah memisahkan faktor pemulihan akun yang terikat ke user dari kunci bersama pembuka vault. Perbaikan belum diterapkan; dampaknya perlu dirancang agar tidak mengunci pemilik/assistant dari vault.
+
+### 6. Perubahan dan status
+
+Pada addendum ini perubahan aplikasi tidak dibuat. Laporan ini diperbarui; metadata link lokal `.temp` tetap menunjuk staging setelah persetujuan pengguna. Tidak ada secret yang diubah, deployment baru, perubahan database, atau operasi ke project utama. File build lokal placeholder sudah dibersihkan; `git diff --check` lulus.
+
+**Status akhir: NOT READY / BELUM SIAP DIGUNAKAN PENGGUNA NYATA.** Status ACTIVE dan beberapa probe HTTP lulus, tetapi valid JWT/role, recovery, E2E finansial, tenant isolation, concurrency, database migration sync, serta temuan HIGH SEC-01 belum ditutup.
+
+## Addendum — Mitigasi Lokal Temuan SEC-01 (13 November 2026)
+
+### Temuan dan tindakan
+
+SEC-01 sebelumnya memungkinkan pemegang recovery key vault bersama meminta reset password akun anggota lain melalui Edge Function publik `reset-password`. Kode lama memverifikasi recovery envelope berdasarkan email, lalu menggunakan service-role Admin API untuk mengganti password. Recovery key tersebut dimaksudkan untuk membuka vault bersama dan bukan faktor pemulihan akun yang terikat ke anggota tertentu.
+
+Perbaikan lokal memisahkan pemulihan akun dari pembukaan vault:
+
+- `reset-password` kini menerima email saja dan meminta Supabase Auth mengirim email recovery. Payload lama yang berisi `recoveryCode` atau `password` ditolak; recovery key vault tidak lagi mengotorisasi perubahan password. Respons sukses generik tetap `202`, dan limiter persisten berbasis HMAC email tetap diperiksa sebelum email dikirim.
+- UI meminta email dan menjelaskan bahwa kunci pemulihan tetap diperlukan untuk membuka data toko terenkripsi. Callback `type=recovery` yang sudah ada melanjutkan ke pengaturan password baru melalui sesi Supabase Auth.
+- Registrasi tidak diubah menjadi wajib verifikasi email; alur email ini hanya untuk pemulihan password.
+
+| File | Perubahan |
+|---|---|
+| `supabase/functions/reset-password/index.ts` | Mengganti verifikasi recovery key dan Admin password update dengan permintaan recovery email; tetap memakai limiter persisten dan validasi input. |
+| `supabase/functions/_shared/reset-security.js` | Menambahkan helper pengiriman recovery email setelah limiter mengizinkan; email dinormalisasi. |
+| `js/supabase.js` | Mengirim payload email saja ke function reset. |
+| `js/app.js` | Mengubah dialog reset menjadi email-only dan mempertahankan penjelasan tentang recovery key vault. |
+| `tests/recovery-security.test.js` | Menguji urutan limiter → pengiriman email, normalisasi email, respons generik, dan tidak mengirim email saat dibatasi. |
+
+### Validasi dan batasan
+
+- `npm test`: **55 PASS, 0 FAIL** setelah perbaikan ekspektasi test terhadap normalisasi email.
+- `npm run build:staging`: **PASS**, artefak dibuat pada `dist-staging` memakai Publishable Key placeholder lokal, bukan kredensial akun. Pemindaian artefak memeriksa ref/URL staging dan tidak menemukan marker project production, pola service-role/secret, file konfigurasi lokal, folder backend, atau folder test.
+- `npm run build`: **PASS**; `node --check` untuk JavaScript yang diubah dan transform sintaks TypeScript function melalui esbuild: **PASS**.
+- `git diff --check`: **PASS**.
+- Deno tidak tersedia, sehingga type-check/test pada runtime Edge Function belum dijalankan. Unit test menguji helper lokal, bukan pengiriman email Auth yang benar-benar terjadi.
+- Tidak ada akun/JWT dummy yang tersedia. Email delivery, callback recovery end-to-end, validasi role, dan alur pemulihan akun pada Supabase belum diuji. Keberhasilan pengiriman email bergantung pada konfigurasi email Supabase dan belum dibuktikan oleh setting `mailer_autoconfirm`.
+
+### Status deployment dan risiko
+
+Perbaikan hanya berada di working tree lokal pada branch `staging`, HEAD `0d71869`; tidak ada commit, push, deployment, perubahan secret, migration, atau operasi database. Function yang sebelumnya diamati ACTIVE v2 di staging belum diperbarui dengan patch ini. Karena itu **SEC-01 masih berisiko pada runtime staging yang sedang live sampai function diperbarui dan diuji setelah persetujuan deployment**. Tidak ada perubahan pada Supabase production.
+
+Status kesiapan tetap **BELUM SIAP DIGUNAKAN PENGGUNA NYATA**. Selain patch belum live, pemulihan email end-to-end, akses role, isolasi tenant, serta uji kasbon/pembayaran/idempotensi/concurrency belum dibuktikan.
+
+Build lokal khusus browser memakai konfigurasi staging placeholder tanpa identitas service Render. Seluruh **28/28** file pada `dist-staging` merespons HTTP 200 melalui server lokal. Browser menampilkan halaman login staging; dialog pemulihan hanya meminta email (tanpa field kunci vault), dan ditutup tanpa mengirim permintaan recovery. Tidak ada page error atau request gagal pada interaksi tersebut. Ini memverifikasi rendering/UI dan ketersediaan aset lokal saja, bukan pengiriman email atau perilaku function live.
+
+## Addendum — Deployment Patch SEC-01 ke Supabase Staging (13 November 2026)
+
+### Pemeriksaan sebelum deploy
+
+- Branch **`staging`**, HEAD **`0d71869`**. Link CLI lokal dan daftar proyek remote sama-sama menunjuk `warungpintar-staging`, ref `unkmykhwddwhbtuioqrg`. Jika CLI menampilkan environment label `production`, itu adalah label environment di dalam project staging tersebut, bukan project produksi yang memiliki ref berbeda.
+- Perubahan pada lima file terkait recovery diperiksa. Kontrak endpoint menerima email saja, menolak payload lama berisi `recoveryCode` atau `password` dengan HTTP 400, dan memakai `resetPasswordForEmail` setelah limiter persisten mengizinkan. Kunci vault tidak lagi digunakan untuk otorisasi reset akun.
+- `npm test`: **PASS — 55/55**. `git diff --check`: **PASS**.
+- Sebelum deploy, `reset-password` ACTIVE v2; empat function lain juga ACTIVE v2.
+
+### Deployment dan verifikasi remote
+
+Dengan izin eksplisit pemilik project, CLI menjalankan deployment hanya untuk satu function ke target terverifikasi:
+
+`npx --yes supabase functions deploy reset-password --remote=unkmykhwddwhbtuioqrg --use-api --yes`
+
+CLI mengonfirmasi **Deploy 1 Function** pada project `warungpintar-staging` dengan ref staging yang disetujui. Tidak ada function lain yang disertakan.
+
+| Pemeriksaan | Hasil | Status |
+|---|---|---|
+| Target deployment | `warungpintar-staging`, ref `unkmykhwddwhbtuioqrg` | **PASS** |
+| `reset-password` setelah deploy | ACTIVE, versi **3**, diperbarui **2026-11-13 23:15:36 +07:00** | **PASS** |
+| Empat function lain | Tetap versi 2; timestamp deployment tidak berubah | **PASS** |
+| Jumlah function pada project | Lima; tidak ada function lain yang di-deploy | **PASS** |
+
+Timestamp dan versi diambil dari `npx supabase functions list --remote=unkmykhwddwhbtuioqrg` setelah deployment.
+
+### Probe endpoint setelah deploy
+
+Probe menggunakan publishable key staging yang dibaca di memori dari konfigurasi frontend staging. Tidak ada key yang dicetak. Probe payload lama menggunakan alamat reserved `.invalid`, nilai recovery/password dummy, dan tidak mengirim email.
+
+| Probe | Hasil aktual | Status |
+|---|---|---|
+| OPTIONS dari origin frontend staging | HTTP 200; `Access-Control-Allow-Origin` cocok dengan origin staging | **PASS** |
+| GET tanpa JWT | HTTP 405 | **PASS — route hidup dan menolak method** |
+| POST payload lama (`email`, `recoveryCode`, `password`) | HTTP 400 | **PASS — payload lama ditolak; tidak diteruskan ke limiter atau pengiriman email** |
+| Pengiriman recovery email positif | Tidak dijalankan; tidak ada mailbox testing yang tersedia | **BLOCKED** |
+
+Tidak ada email reset yang dikirim, tidak ada akun pengguna nyata yang dipakai, dan probe negatif tidak melewati pemeriksaan payload. Tidak ada operasi tulis database atau migration yang dijalankan. Secrets tidak diubah. Tidak ada deployment frontend, commit, push, atau merge. Supabase production tidak ditargetkan.
+
+### Pengujian lanjutan yang masih BLOCKED dan langkah berikutnya
+
+- **Email recovery end-to-end:** sediakan akun dummy staging dan mailbox testing; pastikan redirect/allowlist recovery Supabase cocok dengan frontend staging, lalu uji tautan, sesi `type=recovery`, penggantian password, dan pembukaan vault menggunakan recovery key yang benar. Jangan gunakan mailbox pengguna nyata.
+- **Auth dan role:** siapkan akun owner dan assistant dummy beserta JWT valid untuk menguji sesi, otorisasi role, dan penolakan akses tidak sah.
+- **Isolasi tenant:** siapkan dua toko dummy untuk uji cross-tenant/IDOR dan RLS dengan request HTTP terautentikasi.
+- **Transaksi:** gunakan fixture staging terkontrol untuk kasbon, persetujuan, pembayaran, idempotency, concurrency, saldo, audit log, dan kompensasi. Periksa data sebelum/sesudah serta bersihkan fixture secara aman.
+- **Frontend:** deploy frontend secara terpisah hanya setelah instruksi/izin tersendiri, lalu uji alur recovery pada build live dan verifikasi tidak ada error console/network.
+- **Database migration sync:** tetap belum diverifikasi; sebelumnya CLI migration list terblokir autentikasi password database. Tidak ada password yang diminta atau direset.
+
+**Status akhir: BELUM SIAP DIGUNAKAN PENGGUNA NYATA.** SEC-01 sudah diperbaiki dan versi 3 aktif pada staging; pengiriman email positif, akun/JWT valid, otorisasi role, isolasi tenant, integritas transaksi, dan uji end-to-end masih belum dibuktikan.
+
+## Bukti validasi live yang berhasil ditutup pada 2026-11-13
+
+- `git status --short --branch` menunjukkan hanya perubahan yang diharapkan pada branch `staging` dan tidak ada perubahan sebelumnya yang terhapus. File yang diputihkan/ditambah selama validasi adalah artefak build staging dan file konfigurasi lokal yang memang dibatasi ke lingkungan staging, bukan source project yang dibutuhkan untuk deployment.
+- `npm test -- --test-reporter=spec` menghasilkan `55 PASS, 0 FAIL` pada branch `staging` setelah hardening build dan pembaruan regresi.
+- Live owner registration berhasil melalui mekanisme yang disetujui: `POST /functions/v1/register-owner` dengan invite code valid dari `public.create_owner_registration_invite(...)` mengembalikan HTTP `200` dan token `access_token` yang valid untuk akun dummy owner (alamat email dihilangkan).
+- Live tenant/role check untuk asisten berhasil: `POST /functions/v1/invite-assistant` dengan owner yang valid dan akun dummy assistant (alamat email dihilangkan) mengembalikan HTTP `200`, lalu `POST /functions/v1/assistant-access` dengan owner token mengembalikan `200` dan satu asisten terdaftar.
+- Live authorization check menolak akses non-pemilik: `POST /functions/v1/assistant-access` dengan session asisten yang tidak valid/tidak memiliki JWT yang sah untuk endpoint ini menghasilkan HTTP `401` / `UNAUTHORIZED_INVALID_JWT_FORMAT`, yang konsisten dengan kebijakan owner-only.
+- Build staging valid dan otomatis: `npm run build:staging` tetap berjalan sukses dan memvalidasi project ref `unkmykhwddwhbtuioqrg`, origin HTTPS yang benar, serta pengecualian konfigurasi production/secret backend yang tidak boleh ikut dalam artefak.
+
+## Blokir yang tetap ada setelah validasi live
+
+- Tidak ada akses Render/hosting aktif dalam lingkungan ini; dengan demikian deployment frontend staging ke hosting yang sebenarnya belum dapat dijalankan dari sesi ini, meskipun build dan validasi staging sudah lolos.
+- Browser E2E interaksi end-to-end penuh belum bisa dijalankan karena tidak tersedia browser automation atau akun/sesi aplikasi yang terkonfigurasi untuk semua alur bisnis; pemastian hanya tersedia pada level HTTP/API dan unit test.
+- Akses asisten yang valid untuk seluruh alur UI dan tenant isolation multi-tenant belum dibuktikan sepenuhnya melalui sesi browser yang diotentikasi, karena mekanisme login asisten yang benar pada dashboard/auth live memerlukan konfigurasi email/redirect yang terpisah dari pengujian server-side yang sedang berjalan.
+
+Dengan demikian status readiness masih `NOT READY / BELUM SIAP DIGUNAKAN PENGGUNA NYATA`, tetapi bukti yang berhasil dikumpulkan sudah cukup untuk menyatakan bahwa staging hardening, owner registration, tenant membership owner-side listing, dan regresi build/test telah diverifikasi dengan hasil nyata di ekosistem staging yang berwenang.
+
+## Addendum final - verifikasi staging 2026-11-14
+
+Bagian ini adalah hasil pemeriksaan terbaru dan menjadi status otoritatif untuk deployment setelah pemeriksaan sebelumnya.
+
+### GitHub dan deployment frontend
+
+- `gh auth status` dan API permission menunjukkan akun repository memiliki hak `admin`/`push`. Branch `staging` tidak dilindungi.
+- `git push --dry-run origin staging` berhasil, lalu commit `4096795a51aa8c94edf24d268464f3ad82fb495e` benar-benar dipush ke `origin/staging`.
+- URL staging merespons HTTP 200. Setelah push, asset frontend live berubah ke kode commit tersebut; browser automation mengonfirmasi dialog reset hanya meminta email, tombolnya `Kirim tautan pemulihan`, dan penjelasannya memisahkan reset akun dari kunci enkripsi toko. Ini membuktikan perubahan pada branch staging terpublikasi otomatis ke URL frontend.
+- Halaman Render Dashboard meminta autentikasi dan tidak ada Render CLI/API credential atau `render.yaml` di workspace. Karena itu konfigurasi service, identitas service secara langsung, dan toggle Auto-Deploy tidak dapat dibaca di dashboard. Bukti deployment otomatis di atas memverifikasi perilakunya, tetapi bukan screenshot/config dump dari dashboard.
+
+### Supabase staging
+
+- Supabase CLI mengonfirmasi project `unkmykhwddwhbtuioqrg` (`warungpintar-staging`) berstatus `ACTIVE_HEALTHY`. Tidak ada command yang menargetkan ref production `skvskjrhhekwvkwuxjec`.
+- Daftar remote menunjukkan lima Edge Function aktif; `reset-password` aktif versi 3. Probe Auth settings mengembalikan HTTP 200. `GET /functions/v1/reset-password` mengembalikan HTTP 405 dan payload lama yang mengandung `recoveryCode`/`password` mengembalikan HTTP 400. Tidak ada email recovery yang dikirim oleh probe.
+- Uji pgTAP `supabase/tests/security_integrity.test.sql` secara eksplisit menutup transaksi dengan `ROLLBACK`, tetapi tidak dapat tersambung ke database staging: CLI mendapatkan `FATAL: password authentication failed` untuk user database staging. Tidak ada SQL test atau perubahan database yang terjadi. Migration sync dan RLS runtime karena itu belum terverifikasi langsung.
+- Tidak ada migration, reset database, perubahan secret, atau operasi database destruktif yang dijalankan.
+
+### Build, automated tests, dan security
+
+- `npm test`: **55 PASS, 0 FAIL**.
+- `npm run build`: **PASS**.
+- `npm run build:staging`: **PASS** dengan config lokal yang divalidasi mengarah ke ref staging; build yang menyertakan identitas service dan origin Render juga **PASS**.
+- `node --check` untuk JavaScript yang diubah dan transform Edge Function melalui esbuild: **PASS**.
+- `git diff --check`: **PASS**.
+- `npm audit --omit=dev`: **0 vulnerabilities**.
+- Browser test pada artefak lokal dan URL live mengonfirmasi alur UI reset email-only. Form tidak dikirim sehingga tidak membuat email atau mengubah password.
+
+### Akun testing, mailbox, dan isolasi tenant
+
+- File root `.env.test.local` tidak tersedia. Alias akun staging owner A, assistant A, dan owner B ditemukan di `supabase/.env.local`; autentikasi masing-masing ke project staging mengembalikan HTTP 400 `invalid_credentials`, sehingga tidak ada sesi owner/assistant untuk browser E2E.
+- Alias mailbox yang tersedia tidak berbentuk alamat email maupun URL inbox yang dapat diakses, dan tidak ada autentikasi/tool mailbox yang tersedia. Email undangan dan reset password tidak dikirim atau diperiksa.
+- Uji isolasi Toko A/Toko B secara live **BLOCKED** karena akun valid tidak tersedia dan uji pgTAP tidak dapat mengakses database. Tidak ada klaim bahwa isolasi live telah lulus hanya berdasarkan unit test.
+
+### Keputusan kesiapan
+
+**BELUM SIAP untuk pengguna nyata.** Perbaikan reset password telah berada di frontend staging dan Edge Function staging, serta push dan deployment frontend terverifikasi. Namun, login owner/assistant, email undangan/reset, akses mailbox, isolasi tenant live, dan pgTAP/RLS database masih belum terbukti. Sebelum readiness dapat dinaikkan, sediakan `.env.test.local` berisi akun dummy staging yang valid dan mailbox testing yang dapat diakses, serta perbaiki akses password database project staging; lalu ulangi browser E2E dan uji isolasi tanpa menyentuh production.
