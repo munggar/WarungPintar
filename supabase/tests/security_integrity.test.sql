@@ -6,6 +6,7 @@ select has_table('public', 'owner_registration_invites', 'owner invite table exi
 select has_table('public', 'password_reset_attempts', 'persistent reset limiter table exists');
 select has_table('public', 'owner_registration_attempts', 'persistent owner registration limiter table exists');
 select has_table('public', 'account_recovery_codes', 'account recovery code table exists');
+select has_table('public', 'smart_kasbon_model_training_attempts', 'per-store model training limiter exists');
 select ok(
   (select relrowsecurity from pg_class where oid = 'public.owner_registration_invites'::regclass),
   'owner invite table has RLS enabled'
@@ -22,6 +23,10 @@ select ok(
   (select relrowsecurity from pg_class where oid = 'public.account_recovery_codes'::regclass),
   'account recovery codes have RLS enabled'
 );
+select ok(
+  (select relrowsecurity from pg_class where oid = 'public.smart_kasbon_model_training_attempts'::regclass),
+  'model training limiter has RLS enabled'
+);
 select ok(not has_table_privilege('anon', 'public.owner_registration_invites', 'SELECT'), 'anon cannot read owner invites');
 select ok(not has_table_privilege('authenticated', 'public.owner_registration_invites', 'SELECT'), 'authenticated cannot read owner invites');
 select ok(not has_table_privilege('anon', 'public.password_reset_attempts', 'SELECT'), 'anon cannot read reset attempts');
@@ -30,6 +35,8 @@ select ok(not has_table_privilege('anon', 'public.owner_registration_attempts', 
 select ok(not has_table_privilege('authenticated', 'public.owner_registration_attempts', 'SELECT'), 'authenticated cannot read registration attempts');
 select ok(not has_table_privilege('anon', 'public.account_recovery_codes', 'SELECT'), 'anon cannot read account recovery codes');
 select ok(not has_table_privilege('authenticated', 'public.account_recovery_codes', 'SELECT'), 'authenticated cannot read account recovery codes');
+select ok(not has_table_privilege('anon', 'public.smart_kasbon_model_training_attempts', 'SELECT'), 'anon cannot read model training limiter');
+select ok(not has_table_privilege('authenticated', 'public.smart_kasbon_model_training_attempts', 'SELECT'), 'authenticated cannot read model training limiter');
 select ok(
   has_function_privilege('service_role', 'public.consume_owner_registration_attempt(text)', 'EXECUTE'),
   'service role can consume registration attempts'
@@ -45,6 +52,11 @@ select ok(has_function_privilege('service_role', 'public.reserve_store_invite(te
 select ok(not has_function_privilege('authenticated', 'public.reserve_store_invite(text)', 'EXECUTE'), 'authenticated cannot reserve assistant invite');
 select ok(has_function_privilege('service_role', 'public.create_store_invite(uuid,uuid,text)', 'EXECUTE'), 'service role can issue store invite');
 select ok(not has_function_privilege('authenticated', 'public.create_store_invite(uuid,uuid,text)', 'EXECUTE'), 'authenticated cannot issue store invite');
+select ok(has_function_privilege('service_role', 'public.reserve_smart_kasbon_model_training(uuid)', 'EXECUTE'), 'service role can reserve per-store model training');
+select ok(not has_function_privilege('anon', 'public.reserve_smart_kasbon_model_training(uuid)', 'EXECUTE'), 'anon cannot reserve model training');
+select ok(not has_function_privilege('authenticated', 'public.reserve_smart_kasbon_model_training(uuid)', 'EXECUTE'), 'authenticated cannot reserve model training');
+select ok(has_function_privilege('service_role', 'public.activate_smart_kasbon_model(uuid,text)', 'EXECUTE'), 'service role can activate an eligible model');
+select ok(not has_function_privilege('authenticated', 'public.activate_smart_kasbon_model(uuid,text)', 'EXECUTE'), 'authenticated cannot activate a model directly');
 
 create temporary table test_security_context (
   invite_token text,

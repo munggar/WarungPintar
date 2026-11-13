@@ -67,10 +67,10 @@ Beberapa hal yang menjadi fokus pengembangan:
 | F10 | Pengingat kasbon melalui WhatsApp | Membuka WhatsApp dengan pesan yang dapat ditinjau dan dikirim pengguna. | Kasbon |
 | F11 | Struk digital | Unduh atau bagikan struk melalui fitur browser yang didukung. | Setelah transaksi |
 | F12 | Skor Kesehatan Usaha | Skor dengan bobot perhitungan yang ditampilkan di Beranda. | Beranda |
-| F13 | Akses layanan zakat Lazismu | Tautan ke layanan Zakat Perusahaan Lazismu. | Menu, Zakat Usaha |
+| F13 | Kalkulator zakat usaha | Menghitung estimasi zakat perdagangan, menyimpan perhitungan di vault terenkripsi, dan menyediakan tautan Lazismu. | Menu, Zakat Usaha |
 | F14 | Ekspor laporan | XLSX, CSV, dan cetak atau simpan PDF melalui browser. | Laporan |
 | F15 | Pemisahan penarikan pribadi | Penarikan pribadi dicatat terpisah dari pengeluaran usaha. | Pengeluaran |
-| F16 | Smart Kasbon | Limit adaptif rule-based, skor risiko riwayat pelanggan, dan validasi ledger atomik di server. | Kasbon |
+| F16 | Smart Kasbon | Limit rule-based, skor risiko historis, ledger atomik, dan pipeline model advisory per toko yang hanya dapat diaktifkan setelah evaluasi holdout memenuhi syarat. | Kasbon |
 | — | Sinkronisasi data | Tersedia setelah migrasi basis data dan Edge Functions diterapkan pada proyek Supabase. | Pengaturan |
 
 **Batasan sinkronisasi:** mekanisme saat ini menggunakan pemeriksaan revisi untuk menghindari penimpaan data tanpa pemberitahuan. Mekanisme ini menyinkronkan salinan data terenkripsi, bukan antrean operasi atau penggabungan perubahan per rekaman. Jika data diubah bersamaan pada beberapa perangkat, pengguna harus memilih salinan dari server atau perangkat. Pilihan tersebut dapat mengganti seluruh data toko pada perangkat, sehingga pengujian multi-perangkat dan kondisi jaringan terputus diperlukan sebelum penerapan.
@@ -147,8 +147,12 @@ Buka Supabase Dashboard → **SQL Editor**, lalu jalankan migrasi berikut secara
 2. `supabase/migrations/202610220001_store_data_updated_at_wib.sql`
 3. `supabase/migrations/202610230001_store_qris_storage.sql`
 4. `supabase/migrations/202610240001_smart_kasbon.sql`
+5. `supabase/migrations/202611130001_registration_and_recovery_security.sql`
+6. `supabase/migrations/202611140001_owner_registration_rate_limit.sql`
+7. `supabase/migrations/202611150001_email_free_account_codes.sql`
+8. `supabase/migrations/202611160001_smart_kasbon_ml_pipeline.sql`
 
-Migrasi kedua menyesuaikan `store_data.updated_at` dengan waktu WIB. Migrasi ketiga membuat bucket QRIS privat dengan kebijakan akses pemilik dan anggota. Migrasi keempat menambahkan ledger Smart Kasbon pseudonim dan fungsi transaksi server. Migrasi keamanan akun menambahkan undangan owner satu kali serta penyimpanan rate limit pemulihan. Aplikasi tidak dapat membuat tabel atau bucket menggunakan publishable key.
+Migrasi kedua menyesuaikan `store_data.updated_at` dengan waktu WIB. Migrasi ketiga membuat bucket QRIS privat dengan kebijakan akses pemilik dan anggota. Migrasi keempat menambahkan ledger Smart Kasbon pseudonim dan fungsi transaksi server. Migrasi kelima hingga ketujuh menyiapkan keamanan registrasi serta recovery/invitation berbasis kode; migrasi kedelapan menyiapkan rate limit pelatihan dan aktivasi model per toko. Periksa status/urutan migration pada target sebelum menerapkan. Aplikasi tidak dapat membuat tabel atau bucket menggunakan publishable key.
 
 ### 2. Atur URL autentikasi
 
@@ -186,7 +190,7 @@ Fungsi `reset-password` menerima email akun, Account Recovery Code, dan kata san
 
 `RESET_RATE_LIMIT_SECRET` wajib diisi dengan secret acak minimal 32 karakter; fungsi menggunakannya sebagai HMAC key, bukan menyimpan email mentah pada tabel pembatasan. Jangan memakai contoh placeholder, membagikan secret, atau memasukkannya ke repository. Migration `202611130001_registration_and_recovery_security.sql`, `202611140001_owner_registration_rate_limit.sql`, dan `202611150001_email_free_account_codes.sql` menyiapkan limiter, kode recovery akun, serta undangan asisten berbasis kode. Percobaan pemulihan dan penerbitan kode dibatasi 10 kali per email per jam. Respons email/kode tidak cocok dibuat generik untuk mencegah account enumeration.
 
-Fungsi `smart-kasbon` memerlukan sesi JWT dan keanggotaan toko yang valid. Konfigurasinya mempertahankan verifikasi JWT gateway. Fungsi ini hanya dapat digunakan setelah migrasi Smart Kasbon diterapkan.
+Fungsi `smart-kasbon` memerlukan sesi JWT dan keanggotaan toko yang valid. Konfigurasinya mempertahankan verifikasi JWT gateway. Terapkan migration Smart Kasbon dan pipeline model terlebih dahulu. Training membaca ledger toko yang sedang diminta, menyimpan kandidat sebagai `shadow`, dan tidak mengaktifkannya otomatis. Aktivasi memerlukan evaluasi holdout yang memenuhi batas minimum; jika data nyata tidak cukup, tidak ada artifact atau metrik buatan. Prediksi model bersifat advisory dan tidak mengubah aturan persetujuan kasbon.
 
 ### 4. Konfigurasi autentikasi
 
@@ -265,7 +269,7 @@ Pengujian tersebut mencakup logika bisnis, struktur XLSX, enkripsi, pemulihan ka
 5. **Pengeluaran:** catat biaya operasional dan penarikan pribadi. Penarikan pribadi dicatat terpisah dari biaya usaha.
 6. **Kasbon:** saat pertama kali membuka halaman, pemilik menyinkronkan riwayat piutang pseudonim ke server dan mengatur kondisi kas/modal kerja serta batas kebijakan. Nilai kas aktual harus dikonfirmasi pemilik karena tidak dilacak otomatis oleh aplikasi. Kasbon baru dan pembayaran divalidasi server dan memerlukan koneksi internet. Dashboard menampilkan kondisi usaha dan risiko pelanggan. Tombol pengingat membuka WhatsApp dengan pesan yang dapat ditinjau dan dikirim oleh pengguna.
 7. **Laporan:** pilih periode untuk melihat ringkasan laba rugi, grafik omzet, dan daftar barang terjual beserta jumlah, omzet, serta laba kotor. Ekspor CSV dan XLSX mencakup transaksi pada periode yang dipilih.
-8. **Zakat Usaha:** pilih **Buka Zakat Perusahaan Lazismu** untuk membuka [layanan Zakat Perusahaan Lazismu](https://donasi.lazismu.org/zakatperusahaan). Perhitungan dan pembayaran berlangsung di situs Lazismu. Aplikasi tidak mengirim data atau menerima konfirmasi pembayaran.
+8. **Zakat Usaha:** masukkan aset dan kewajiban perdagangan, harga emas beserta sumber/tanggal, serta konfirmasi haul untuk melihat estimasi zakat. Perhitungan tersimpan di vault terenkripsi browser; tinjau hasilnya dan konsultasikan kewajiban dengan lembaga zakat. Tautan **Buka Zakat Perusahaan Lazismu** membuka [layanan Lazismu](https://donasi.lazismu.org/zakatperusahaan); aplikasi tidak mengirim data atau menerima konfirmasi pembayaran.
 9. **Struk transaksi:** unduh PDF/JPG atau bagikan melalui fitur Web Share jika didukung browser. Jika berbagi berkas tidak didukung, unduh berkas lalu lampirkan secara manual.
 10. **Menu dan Pengaturan:** pemilik dapat menghapus riwayat penjualan, pembelian, pengeluaran, penarikan pribadi, dan kasbon beserta pembayarannya melalui Menu. Data produk, pelanggan, pengaturan toko, serta jumlah stok tidak berubah. Pengaturan juga menyediakan pengelolaan asisten, kunci pemulihan, sinkronisasi, dan cadangan terenkripsi.
 
@@ -277,8 +281,8 @@ Pengujian tersebut mencakup logika bisnis, struktur XLSX, enkripsi, pemulihan ka
 - **Produk lambat terjual** = produk masih memiliki stok, tidak terjual selama 30 hari, dan telah tercatat lebih dari 30 hari.
 - **Skor Kesehatan Usaha** memiliki rentang 0–100 dan menggunakan data 30 hari: margin bersih bernilai 40 poin dengan target 15%; perputaran stok bernilai 30 poin dengan target 1× berdasarkan HPP dibanding nilai stok; dan rasio piutang bernilai 30 poin, dengan rasio 0% memperoleh nilai penuh dan rasio 30% atau lebih memperoleh 0 poin.
 - **Smart Kasbon:** batas total absolut dihitung dari nilai terkecil antara batas kebijakan, kas tersedia setelah cadangan, dan modal kerja setelah kewajiban, lalu dikalikan faktor kesehatan. Saldo piutang aktif yang sudah ada diperhitungkan sekali saat backend memeriksa `piutang_aktif + kasbon_baru <= batas_total`; sisa limit adalah batas total dikurangi piutang aktif. Faktor kesehatan adalah 0 untuk kritis, 0,1 cold start, 0,2 menurun, 0,35 stagnan, 0,6 stabil, 0,8 sehat, dan 1 untuk sangat sehat. Skor risiko pelanggan (0–100) dihitung sebagai `100 − 50 × proporsi pelunasan terlambat − 30 × proporsi saldo jatuh tempo − 20 × rata-rata keterlambatan/30 hari` (komponen terakhir dibatasi maksimal 20 poin). Risiko tinggi menolak kasbon baru, risiko sedang membatasi limit pelanggan menjadi separuh, dan risiko rendah tidak memberi pengali tambahan. Transaksi memakai penguncian per toko di database agar dua permintaan bersamaan tidak melewati batas. Angka kas, modal kerja, dan snapshot finansial berasal dari pemilik/browser; backend tidak dapat memverifikasi kesesuaiannya dengan vault terenkripsi. Karena itu limit ini hanya aturan internal berdasarkan input tepercaya, bukan jaminan kesehatan usaha atau audit kemampuan membayar. Ringkasan yang dipakai harus berumur kurang dari tujuh hari.
-- **Status ML:** model machine learning belum dilatih atau digunakan untuk keputusan. Sampai tersedia jumlah data historis yang memadai dan evaluasi holdout yang terukur, semua keputusan dibuat oleh aturan yang ditampilkan secara eksplisit.
-- **Zakat:** perhitungan dilakukan pada layanan Lazismu yang dibuka dari menu Zakat Usaha. Aplikasi tidak menyediakan kalkulator zakat internal.
+- **Status ML:** pipeline logistic regression sudah tersedia untuk data ledger per toko. Labelnya adalah pelunasan penuh sebelum akhir tanggal jatuh tempo WIB; holdout kronologis mengeluarkan pelanggan yang muncul di data training. Model hanya dapat menjadi advisory setelah jumlah data matang, distribusi kelas, holdout pelanggan independen, dan metrik evaluasi memenuhi ambang. Tanpa data tersebut model tetap tidak aktif dan semua persetujuan tetap ditentukan aturan server. Tes teknis memakai fixture terpisah dan bukan bukti performa bisnis.
+- **Zakat:** kalkulator memperkirakan zakat perdagangan berdasarkan input pemilik; nilai emas manual dan konfirmasi haul harus diverifikasi. Hasilnya bukan bukti pembayaran atau fatwa.
 
 ## Struktur Proyek
 

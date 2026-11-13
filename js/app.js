@@ -246,6 +246,12 @@ async function authorizeSmartKasbonLoan(debt, expected) {
     const reasons = Array.isArray(decision?.reasons) ? decision.reasons.join(' ') : '';
     throw new Error(reasons || 'Kasbon ditolak oleh kebijakan Smart Kasbon.');
   }
+  const prediction = decision.model_prediction;
+  if (prediction?.state === 'predicted') {
+    toast(`Indikasi model: ${prediction.prediction === 'on_time' ? 'berpotensi lunas tepat waktu' : 'berisiko terlambat'}. Ini prediksi advisory, bukan jaminan.`);
+  } else if (prediction?.state === 'unavailable') {
+    toast('Model ML belum aktif; keputusan tetap berdasarkan aturan batas kasbon.');
+  }
   return loanId;
 }
 
@@ -654,7 +660,7 @@ const ROUTES = {
   pengeluaran: { title: 'Pengeluaran', render: vPengeluaran },
   kasbon: { title: 'Kasbon', render: vKasbon, mount: mKasbon },
   laporan: { title: 'Laporan', render: vLaporan },
-  zakat: { title: 'Zakat Usaha', render: vZakat },
+  zakat: { title: 'Zakat Usaha', render: vZakat, mount: mZakat },
   pengaturan: { title: 'Pengaturan', render: vPengaturan },
   menu: { title: 'Menu', render: vMenu },
 };
@@ -1319,6 +1325,32 @@ function smartKasbonPanel() {
     return `<li><span>${esc(name)}<small>Risiko ${esc(item.risk || 'sedang')} · saldo ${rp(remaining)} · limit ${rp(item.limits?.per_customer || 0)}</small></span><b>Skor ${item.risk_score ?? 60}/100</b></li>`;
   }).join('');
   const decisions = (dashboard.decisions || []).slice(0, 5);
+  const model = dashboard.model || {};
+  const modelState = model.state === 'active'
+    ? `Model advisory aktif (${esc(model.version)}).`
+    : model.state === 'shadow'
+      ? `Kandidat model shadow (${esc(model.version)}), belum memengaruhi keputusan.`
+      : model.state === 'rejected'
+        ? 'Kandidat terakhir belum memenuhi syarat.'
+        : model.state === 'disabled'
+          ? 'Model dinonaktifkan.'
+          : 'Belum ada model yang dapat digunakan.';
+  const activeModelText = model.active_version && model.active_version !== model.version
+    ? ` Model advisory aktif: ${esc(model.active_version)}.`
+    : '';
+  const evaluation = model.metrics?.evaluation;
+  const hasEvaluation = evaluation && Number.isSafeInteger(evaluation.sample_count)
+    && ['accuracy', 'brier_score', 'expected_calibration_error'].every((key) => Number.isFinite(evaluation[key]));
+  const evaluationText = hasEvaluation
+    ? `Holdout ${evaluation.sample_count} contoh: akurasi ${pct(evaluation.accuracy)}, Brier ${evaluation.brier_score.toFixed(3)}, ECE ${evaluation.expected_calibration_error.toFixed(3)}.`
+    : '';
+  const trainButton = OWNER()
+    ? '<button class="btn small" data-act="smart-kasbon-model-evaluate">Latih dan evaluasi dari data toko</button>'
+    : '';
+  const activateButton = OWNER() && model.state === 'shadow'
+    && model.metrics?.activation_eligible === true && model.active_version !== model.version
+    ? `<button class="btn small" data-act="smart-kasbon-model-activate" data-version="${esc(model.version)}">Aktifkan advisory</button>`
+    : '';
   return `<section class="card">
     <div class="row wrap"><h2>Smart Kasbon</h2>${setupButton}<button class="btn ghost small" data-act="smart-kasbon-refresh">Perbarui</button></div>
     <p>Kondisi toko: <b>${esc(healthNames[health.health] || 'Belum dinilai')}</b></p>
@@ -1332,7 +1364,8 @@ function smartKasbonPanel() {
     <p class="muted small">Batas ini adalah aturan internal, bukan jaminan kesehatan usaha. Snapshot dan kas/modal kerja berasal dari browser/pemilik dan tidak dapat diverifikasi server terhadap vault terenkripsi.</p>
     <p class="small">Risiko riwayat pelanggan: ${esc(riskText)}.</p>
     ${riskRows ? `<details><summary>Skor risiko pelanggan (${risks.length})</summary><ul class="rows">${riskRows}</ul>${risks.length > 10 ? `<p class="muted small">Menampilkan 10 dari ${risks.length} pelanggan.</p>` : ''}</details>` : ''}
-    <p class="muted small">Keputusan limit menggunakan aturan transparan; ML belum digunakan. Status model: ${esc(dashboard.model?.state || 'cold_start')}.</p>
+    <p class="muted small">Keputusan limit tetap memakai aturan transparan. ${modelState}${activeModelText} ${esc(evaluationText)} Prediksi ML hanya advisory dan tidak mengubah persetujuan kasbon.</p>
+    <div class="row wrap">${trainButton}${activateButton}</div>
     ${decisions.length ? `<details><summary>Keputusan terbaru (${decisions.length})</summary><ul class="plain small">${decisions.map((item) => `<li>${esc(item.action)} · ${item.approved === null ? 'dicatat' : item.approved ? 'disetujui' : 'ditolak'} · ${fmtDate(item.created_at)}</li>`).join('')}</ul></details>` : ''}
   </section>`;
 }
@@ -1469,6 +1502,48 @@ async function setupSmartKasbon() {
   }
 }
 
+async function evaluateSmartKasbonModel() {
+  if (!OWNER()) return toast('Hanya pemilik yang dapat melatih model Smart Kasbon.', 'err');
+  if (S.smartKasbonMutationInProgress || S.processingDebtIds.size || S.checkoutInProgress) {
+    return toast('Selesaikan transaksi kasbon yang sedang berjalan terlebih dahulu.', 'err');
+  }
+  S.smartKasbonMutationInProgress = true;
+  try {
+    const result = await cloud.smartKasbon('evaluate_model');
+    await fetchSmartKasbon(true);
+    if (result.state === 'shadow') {
+      toast(result.activation_eligible
+        ? 'Evaluasi holdout selesai. Kandidat disimpan sebagai shadow; model belum aktif.'
+        : 'Evaluasi selesai, tetapi kandidat belum memenuhi syarat aktivasi.');
+    } else {
+      toast(result.reason || 'Model belum dapat dilatih dari data toko.', 'err');
+    }
+  } finally {
+    S.smartKasbonMutationInProgress = false;
+  }
+}
+
+async function activateSmartKasbonModel(version) {
+  if (!OWNER()) return toast('Hanya pemilik yang dapat mengaktifkan model Smart Kasbon.', 'err');
+  if (S.smartKasbonMutationInProgress || S.processingDebtIds.size || S.checkoutInProgress) {
+    return toast('Selesaikan transaksi kasbon yang sedang berjalan terlebih dahulu.', 'err');
+  }
+  const confirmed = await confirmModal(
+    'Aktifkan model advisory Smart Kasbon?',
+    'Aktifkan model',
+    'Model hanya menampilkan indikasi risiko. Batas dan persetujuan kasbon tetap ditentukan oleh aturan yang ada.',
+  );
+  if (!confirmed) return;
+  S.smartKasbonMutationInProgress = true;
+  try {
+    const result = await cloud.smartKasbon('activate_model', { version });
+    await fetchSmartKasbon(true);
+    toast(`Model advisory ${result.version} diaktifkan.`);
+  } finally {
+    S.smartKasbonMutationInProgress = false;
+  }
+}
+
 /* ============ Laporan ============ */
 function repRange() {
   const now = new Date(), r = S.rep;
@@ -1551,7 +1626,39 @@ function exportXlsx() {
 
 /* ============ Zakat ============ */
 function vZakat() {
-  return '<a class="btn primary big" href="https://donasi.lazismu.org/zakatperusahaan" target="_blank" rel="noopener noreferrer">Buka Zakat Perusahaan Lazismu</a>';
+  const value = (key, fallback = '') => esc(S.cfg[key] ?? fallback);
+  const amount = (id, key, label) => `<label>${label}<input id="${id}" type="number" min="0" step="1" inputmode="numeric" value="${value(key)}"></label>`;
+  const saved = S.cfg.zakatLastCalculation;
+  const savedAt = saved ? Date.parse(saved.waktuSimpan || saved.waktuHitung) : NaN;
+  return `<section class="card">
+    <h2>Kalkulator zakat usaha</h2>
+    <p class="muted small">Kalkulasi zakat perdagangan berdasarkan data yang dimasukkan pemilik. Verifikasi nisab, haul, harga emas, dan kewajiban kepada lembaga zakat.</p>
+    <div class="grid2">
+      <label>Nama usaha<input id="z-nama" value="${value('znama')}"></label>
+      <label>Jenis usaha<select id="z-jenis">
+        <option value="perdagangan" ${value('zjenis', 'perdagangan') === 'perdagangan' ? 'selected' : ''}>Perdagangan</option>
+        <option value="lainnya" ${value('zjenis') === 'lainnya' ? 'selected' : ''}>Lainnya (belum didukung)</option>
+      </select></label>
+      ${amount('z-kas', 'zkas', 'Kas usaha (Rp)')}
+      ${amount('z-bank', 'zbank', 'Saldo rekening usaha (Rp)')}
+      ${amount('z-persediaan', 'zpersediaan', 'Nilai pasar persediaan (Rp)')}
+      ${amount('z-keuntungan', 'zkeuntungan', 'Keuntungan belum tercakup (Rp)')}
+      ${amount('z-harta-lain', 'zhartaLain', 'Harta perdagangan lain (Rp)')}
+      ${amount('z-piutang', 'zpiutang', 'Piutang diperkirakan tertagih (Rp)')}
+      ${amount('z-piutang-macet', 'zpiutangMacet', 'Piutang bermasalah (Rp)')}
+      ${amount('z-utang', 'zutang', 'Utang jatuh tempo (Rp)')}
+      ${amount('z-utang-lain', 'zutangLain', 'Utang belum jatuh tempo (Rp)')}
+      <label>Tanggal mulai haul<input id="z-mulai" type="date" value="${value('zmulai')}"></label>
+      <label>Tanggal perhitungan<input id="z-tanggal" type="date" value="${value('ztanggal', L.ymd(new Date()))}"></label>
+      ${amount('z-emas', 'hargaEmas', 'Harga emas per gram (Rp)')}
+      <label>Sumber harga emas<input id="z-sumber" value="${value('zsumber')}"></label>
+      <label>Tanggal acuan harga emas<input id="z-emas-tanggal" type="date" value="${value('zemasTanggal')}"></label>
+      <label class="row"><input id="z-haul-confirm" type="checkbox" ${S.cfg.zhaulConfirm ? 'checked' : ''}> Saya mengonfirmasi kepemilikan harta berkesinambungan selama haul</label>
+    </div>
+    <div id="z-hasil" aria-live="polite"></div>
+    ${Number.isFinite(savedAt) ? `<p class="muted small">Perhitungan terakhir disimpan ${esc(new Date(savedAt).toLocaleString('id-ID'))}.</p>` : ''}
+    <a class="btn ghost" href="https://donasi.lazismu.org/zakatperusahaan" target="_blank" rel="noopener noreferrer">Buka Zakat Perusahaan Lazismu</a>
+  </section>`;
 }
 function mZakat() {
   const fields = [
@@ -1695,6 +1802,16 @@ function mZakat() {
     input.addEventListener(input.type === 'checkbox' || input.tagName === 'SELECT' ? 'change' : 'input', () => { calculate(); scheduleSave(); });
   }
   calculate();
+}
+
+async function saveZakatCalculation() {
+  if (!S.lastZakat) return toast('Lengkapi data perhitungan zakat terlebih dahulu.', 'err');
+  await setCfg('zakatLastCalculation', {
+    ...S.lastZakat,
+    waktuSimpan: new Date().toISOString(),
+  });
+  toast('Perhitungan zakat tersimpan di penyimpanan terenkripsi.');
+  render();
 }
 
 /* ============ Menu dan pengaturan ============ */
@@ -1883,6 +2000,9 @@ const A = {
   manualdebt: manualDebt,
   'smart-kasbon-setup': setupSmartKasbon,
   'smart-kasbon-refresh': () => fetchSmartKasbon(true),
+  'smart-kasbon-model-evaluate': evaluateSmartKasbonModel,
+  'smart-kasbon-model-activate': (d) => activateSmartKasbonModel(d.version),
+  'save-zakat': saveZakatCalculation,
   togglelunas: () => { S.showLunas = !S.showLunas; render(); },
   csv: exportCSV,
   xlsx: exportXlsx,

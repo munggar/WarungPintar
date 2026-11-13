@@ -1,7 +1,19 @@
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
 import { validatedSmartKasbonTimestamp } from '../../../js/logic.js';
+import {
+  buildSmartKasbonTrainingExamples,
+  predictSmartKasbonModel,
+  smartKasbonFeatureVector,
+  trainAndEvaluateSmartKasbonModel,
+  validateSmartKasbonModelArtifact,
+  SMART_KASBON_MODEL_MINIMUMS,
+} from '../_shared/smart-kasbon-model.js';
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const MODEL_VERSION_PATTERN = /^sklr-v1-\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
+const MODEL_TRAINING_PAGE_SIZE = 500;
+const MODEL_MAX_TRAINING_LOANS = 10000;
+const MODEL_MAX_TRAINING_PAYMENTS = 50000;
 
 class ValidationError extends Error {}
 
@@ -156,19 +168,20 @@ Deno.serve(async (request) => {
       .select('role').eq('store_id', storeId).eq('user_id', userData.user.id).maybeSingle();
     if (memberError) throw memberError;
     if (!membership) return Response.json({ error: 'Akun tidak memiliki akses ke toko ini.' }, { status: 403, headers });
-    const ownerOnly = ['bootstrap', 'set_policy', 'sync_finance', 'evaluate_model', 'clear_history'].includes(action);
+    const ownerOnly = ['bootstrap', 'set_policy', 'sync_finance', 'evaluate_model', 'activate_model', 'clear_history'].includes(action);
     if (ownerOnly && membership.role !== 'owner') {
       return Response.json({ error: 'Aksi ini hanya dapat dilakukan pemilik toko.' }, { status: 403, headers });
     }
 
     let result: unknown;
     if (action === 'dashboard') {
-      const [policyResult, decisionsResult, modelsResult] = await Promise.all([
+      const [policyResult, decisionsResult, modelsResult, activeModelResult] = await Promise.all([
         admin.from('smart_kasbon_policies').select('*').eq('store_id', storeId).maybeSingle(),
         admin.from('smart_kasbon_decisions').select('id,loan_id,customer_id,action,approved,decision,created_at').eq('store_id', storeId).order('id', { ascending: false }).limit(20),
         admin.from('smart_kasbon_model_versions').select('version,state,metrics,training_count,evaluation_count,created_at').eq('store_id', storeId).order('id', { ascending: false }).limit(1),
+        admin.from('smart_kasbon_model_versions').select('version').eq('store_id', storeId).eq('state', 'active').maybeSingle(),
       ]);
-      for (const item of [policyResult, decisionsResult, modelsResult]) if (item.error) throw item.error;
+      for (const item of [policyResult, decisionsResult, modelsResult, activeModelResult]) if (item.error) throw item.error;
       const policy = policyResult.data;
       const { data: health, error: healthError } = await admin.rpc('smart_kasbon_evaluate', {
         p_store_id: storeId,
@@ -215,10 +228,133 @@ Deno.serve(async (request) => {
         },
         risks: riskResults,
         decisions: decisionsResult.data ?? [],
-        model: modelsResult.data?.[0] ?? { state: 'cold_start', training_count: 0, evaluation_count: 0 },
+        model: {
+          ...(modelsResult.data?.[0] ?? { state: 'cold_start', training_count: 0, evaluation_count: 0 }),
+          active_version: activeModelResult.data?.version ?? null,
+        },
       };
+    } else if (action === 'evaluate_model') {
+      const { count: sourceLoanCount, error: countError } = await admin.from('smart_kasbon_loans')
+        .select('id', { count: 'exact', head: true }).eq('store_id', storeId).eq('status', 'active');
+      if (countError) throw countError;
+      if ((sourceLoanCount ?? 0) < SMART_KASBON_MODEL_MINIMUMS.trainingRows + SMART_KASBON_MODEL_MINIMUMS.evaluationRows) {
+        result = {
+          state: 'insufficient_data',
+          reason: 'Belum ada cukup riwayat kasbon nyata untuk train dan holdout independen.',
+          source_loan_count: sourceLoanCount ?? 0,
+          minimums: SMART_KASBON_MODEL_MINIMUMS,
+        };
+      } else {
+        const { data: reserved, error: reserveError } = await admin.rpc('reserve_smart_kasbon_model_training', {
+          p_store_id: storeId,
+        });
+        if (reserveError) throw reserveError;
+        if (reserved !== true) {
+          result = { state: 'rate_limited', reason: 'Pelatihan model dibatasi satu kali per toko setiap 24 jam.' };
+        } else {
+          const loans: Array<Record<string, unknown>> = [];
+          const payments: Array<Record<string, unknown>> = [];
+          let tooManyRows = false;
+          for (let offset = 0; ; offset += MODEL_TRAINING_PAGE_SIZE) {
+            const { data, error } = await admin.from('smart_kasbon_loans')
+              .select('id,customer_id,amount,paid_amount,due_date,created_at,status,settled_at,decision_features')
+              .eq('store_id', storeId).eq('status', 'active')
+              .order('created_at', { ascending: true }).order('id', { ascending: true })
+              .range(offset, offset + MODEL_TRAINING_PAGE_SIZE - 1);
+            if (error) throw error;
+            const page = data ?? [];
+            loans.push(...page);
+            if (loans.length > MODEL_MAX_TRAINING_LOANS) {
+              tooManyRows = true;
+              break;
+            }
+            const loanIds = page.map((loan) => loan.id);
+            if (loanIds.length) {
+              for (let paymentOffset = 0; ; paymentOffset += 1000) {
+                const { data: paymentRows, error: paymentError } = await admin.from('smart_kasbon_payments')
+                  .select('id,loan_id,amount,paid_at').eq('store_id', storeId).in('loan_id', loanIds)
+                  .order('paid_at', { ascending: true }).order('id', { ascending: true })
+                  .range(paymentOffset, paymentOffset + 999);
+                if (paymentError) throw paymentError;
+                const paymentPage = paymentRows ?? [];
+                payments.push(...paymentPage);
+                if (payments.length > MODEL_MAX_TRAINING_PAYMENTS) {
+                  tooManyRows = true;
+                  break;
+                }
+                if (paymentPage.length < 1000) break;
+              }
+              if (tooManyRows) break;
+            }
+            if (page.length < MODEL_TRAINING_PAGE_SIZE) break;
+          }
+          if (tooManyRows) {
+            result = {
+              state: 'dataset_too_large',
+              reason: 'Riwayat toko melebihi batas aman satu proses pelatihan.',
+              maximum_loans: MODEL_MAX_TRAINING_LOANS,
+              maximum_payments: MODEL_MAX_TRAINING_PAYMENTS,
+            };
+          } else {
+            const examples = buildSmartKasbonTrainingExamples(loans, payments, Date.now());
+            const training = trainAndEvaluateSmartKasbonModel(examples);
+            if (training.state !== 'candidate' || !training.model || !training.metrics) {
+              result = {
+                state: 'insufficient_data',
+                reason: training.reason || 'Data matang belum memenuhi syarat evaluasi.',
+                counts: training.counts,
+                minimums: training.minimums ?? SMART_KASBON_MODEL_MINIMUMS,
+              };
+            } else {
+              validateSmartKasbonModelArtifact(training.model);
+              const { error: insertError } = await admin.from('smart_kasbon_model_versions').insert({
+                store_id: storeId,
+                version: training.model.version,
+                state: 'shadow',
+                feature_version: training.model.feature_version,
+                model: training.model,
+                metrics: training.metrics,
+                training_count: training.metrics.training_count,
+                evaluation_count: training.metrics.evaluation_count,
+              });
+              if (insertError) throw insertError;
+              result = {
+                state: 'shadow',
+                version: training.model.version,
+                activation_eligible: training.metrics.activation_eligible,
+                metrics: training.metrics,
+                counts: training.counts,
+                reason: training.metrics.activation_eligible
+                  ? 'Kandidat hanya disimpan sebagai shadow; aktivasi advisory memerlukan tindakan pemilik.'
+                  : 'Kandidat disimpan sebagai shadow dan belum memenuhi ambang aktivasi.',
+              };
+            }
+          }
+        }
+      }
+    } else if (action === 'activate_model') {
+      const version = String(payload.version ?? '');
+      if (!MODEL_VERSION_PATTERN.test(version)) throw new ValidationError('Versi model tidak valid.');
+      const { data: candidate, error: candidateError } = await admin.from('smart_kasbon_model_versions')
+        .select('version,state,feature_version,model,metrics')
+        .eq('store_id', storeId).eq('version', version).eq('state', 'shadow').maybeSingle();
+      if (candidateError) throw candidateError;
+      if (!candidate) throw new ValidationError('Kandidat model tidak ditemukan atau sudah berubah status.');
+      validateSmartKasbonModelArtifact(candidate.model);
+      if (candidate.model.feature_version !== candidate.feature_version
+        || candidate.metrics?.activation_eligible !== true) {
+        throw new ValidationError('Kandidat model belum memenuhi syarat aktivasi advisory.');
+      }
+      const { data: activated, error: activateError } = await admin.rpc('activate_smart_kasbon_model', {
+        p_store_id: storeId,
+        p_version: version,
+      });
+      if (activateError) throw activateError;
+      if (activated !== true) throw new Error('Model tidak berhasil diaktifkan.');
+      result = { state: 'active', version, advisory_only: true };
     } else {
       let rpcPayload: Record<string, unknown> = {};
+      let modelPrediction: Record<string, unknown> | null = null;
       if (action === 'clear_history') {
         if (payload.reset_policy != null && typeof payload.reset_policy !== 'boolean') {
           throw new ValidationError('Penanda reset kebijakan tidak valid.');
@@ -247,13 +383,54 @@ Deno.serve(async (request) => {
         };
       } else if (action === 'void_loan') rpcPayload = { loan_id: uuid(payload.loan_id, 'ID kasbon') };
       else if (action === 'void_payment') rpcPayload = { payment_id: uuid(payload.payment_id, 'ID pembayaran') };
-      else if (action === 'evaluate_model') {
-        return Response.json({
-          state: 'unavailable',
-          reason: 'Belum ada data historis yang cukup untuk melatih dan mengevaluasi model dengan holdout.',
-        }, { headers });
-      } else {
+      else {
         return Response.json({ error: 'Aksi Smart Kasbon tidak dikenal.' }, { status: 400, headers });
+      }
+
+      if (action === 'issue') {
+        const { data: policyDecision, error: decisionError } = await admin.rpc('smart_kasbon_evaluate', {
+          p_store_id: storeId,
+          p_customer_id: rpcPayload.customer_id,
+          p_amount: rpcPayload.amount,
+        });
+        if (decisionError) throw decisionError;
+        if (policyDecision?.approved !== true) {
+          modelPrediction = { state: 'not_run', reason: 'Permintaan tidak disetujui oleh aturan batas kasbon.' };
+        } else {
+          const jakartaToday = new Date(Date.now() + 7 * 60 * 60 * 1000).toISOString().slice(0, 10);
+          if (String(rpcPayload.due_date) < jakartaToday) {
+            modelPrediction = { state: 'not_run', reason: 'Tanggal jatuh tempo telah lewat sebelum prediksi dapat dibuat.' };
+          } else {
+            const { data: activeModel, error: activeModelError } = await admin.from('smart_kasbon_model_versions')
+              .select('version,feature_version,model')
+              .eq('store_id', storeId).eq('state', 'active').maybeSingle();
+            if (activeModelError) throw activeModelError;
+            if (!activeModel) {
+              modelPrediction = {
+                state: 'unavailable',
+                reason: 'Belum ada model yang diaktifkan; keputusan tetap mengikuti aturan batas kasbon.',
+              };
+            } else {
+              validateSmartKasbonModelArtifact(activeModel.model);
+              if (activeModel.model.feature_version !== activeModel.feature_version) {
+                throw new Error('Versi fitur model aktif tidak sesuai dengan artifact.');
+              }
+              const features = smartKasbonFeatureVector({
+                amount: rpcPayload.amount,
+                due_date: rpcPayload.due_date,
+                created_at: new Date().toISOString(),
+                decision_features: policyDecision,
+              });
+              const prediction = predictSmartKasbonModel(activeModel.model, features);
+              modelPrediction = {
+                state: 'predicted',
+                prediction: prediction.prediction,
+                model_version: prediction.model_version,
+                advisory_only: true,
+              };
+            }
+          }
+        }
       }
 
       const { data, error } = await admin.rpc('smart_kasbon_transaction', {
@@ -264,6 +441,15 @@ Deno.serve(async (request) => {
       });
       if (error) throw error;
       result = data;
+      if (action === 'issue' && data && typeof data === 'object' && !Array.isArray(data)) {
+        const decision = data as Record<string, unknown>;
+        result = {
+          ...decision,
+          model_prediction: decision.approved === true
+            ? modelPrediction
+            : { state: 'not_run', reason: 'Permintaan tidak disetujui oleh aturan batas kasbon.' },
+        };
+      }
     }
 
     return Response.json(result, { headers });
