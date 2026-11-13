@@ -1,8 +1,8 @@
 import { createHash } from 'node:crypto';
 import { cp, mkdir, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises';
+import * as esbuild from 'esbuild';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { spawnSync } from 'node:child_process';
 
 const ROOT = fileURLToPath(new URL('../', import.meta.url));
 const OUTPUT_DIR = path.join(ROOT, 'dist-staging');
@@ -113,6 +113,35 @@ async function listFiles(directory, relative = '') {
   return files;
 }
 
+export function sanitizeProductionConfigSource(source) {
+  const productionUrl = /^export const PRODUCTION_SUPABASE_URL = .*;$/m;
+  const productionKey = /^export const PRODUCTION_SUPABASE_PUBLISHABLE_KEY = .*;$/m;
+  const productionUrlValue = source.match(/^export const PRODUCTION_SUPABASE_URL = ['"]([^'"]+)['"];$/m)?.[1];
+  const productionKeyValue = source.match(/^export const PRODUCTION_SUPABASE_PUBLISHABLE_KEY = ['"]([^'"]+)['"];$/m)?.[1];
+  if (!productionUrl.test(source) || !productionKey.test(source)
+    || !productionUrlValue || !productionKeyValue) {
+    fail('Konfigurasi production tidak dapat dipisahkan dengan aman untuk artefak staging.');
+  }
+  const sanitized = source
+    .replace(productionUrl, "export const PRODUCTION_SUPABASE_URL = '';")
+    .replace(productionKey, "export const PRODUCTION_SUPABASE_PUBLISHABLE_KEY = '';");
+  if (sanitized.includes(productionUrlValue) || sanitized.includes(productionKeyValue)) {
+    fail('Konfigurasi production masih tersisa dalam file konfigurasi staging.');
+  }
+  return sanitized;
+}
+
+export async function buildBarcodeScanner(esbuildApi, outfile) {
+  await esbuildApi.build({
+    entryPoints: [path.join(ROOT, 'js', 'barcode-scanner-entry.js')],
+    bundle: true,
+    minify: true,
+    format: 'esm',
+    target: 'es2020',
+    outfile,
+  });
+}
+
 async function copyFrontend(tempDir) {
   for (const file of ['index.html', 'manifest.webmanifest', 'sw.js', 'THIRD_PARTY_NOTICES.txt']) {
     await cp(path.join(ROOT, file), path.join(tempDir, file));
@@ -129,41 +158,15 @@ async function copyFrontend(tempDir) {
     const sourcePath = path.join(ROOT, 'js', entry.name);
     const outputPath = path.join(jsOutputDir, entry.name);
     if (entry.name === 'config.js') {
-      let configSource = await readFile(sourcePath, 'utf8');
-      const productionUrl = /^export const PRODUCTION_SUPABASE_URL = .*;$/m;
-      const productionKey = /^export const PRODUCTION_SUPABASE_PUBLISHABLE_KEY = .*;$/m;
-      const productionUrlValue = configSource.match(/^export const PRODUCTION_SUPABASE_URL = ['"]([^'"]+)['"];$/m)?.[1];
-      const productionKeyValue = configSource.match(/^export const PRODUCTION_SUPABASE_PUBLISHABLE_KEY = ['"]([^'"]+)['"];$/m)?.[1];
-      if (!productionUrl.test(configSource) || !productionKey.test(configSource)
-        || !productionUrlValue || !productionKeyValue) {
-        fail('Konfigurasi production tidak dapat dipisahkan dengan aman untuk artefak staging.');
-      }
-      configSource = configSource
-        .replace(productionUrl, "export const PRODUCTION_SUPABASE_URL = '';")
-        .replace(productionKey, "export const PRODUCTION_SUPABASE_PUBLISHABLE_KEY = '';");
-      if (configSource.includes(productionUrlValue) || configSource.includes(productionKeyValue)) {
-        fail('Konfigurasi production masih tersisa dalam file konfigurasi staging.');
-      }
-      await writeFile(outputPath, configSource);
+      const configSource = await readFile(sourcePath, 'utf8');
+      await writeFile(outputPath, sanitizeProductionConfigSource(configSource));
     } else {
       await cp(sourcePath, outputPath);
     }
   }
 
-  const esbuildCli = path.join(ROOT, 'node_modules', 'esbuild', 'bin', 'esbuild');
-  const scannerEntry = path.join(ROOT, 'js', 'barcode-scanner-entry.js');
   const scannerOutput = path.join(jsOutputDir, 'barcode-scanner.js');
-  const result = spawnSync(process.execPath, [
-    esbuildCli,
-    scannerEntry,
-    '--bundle',
-    '--minify',
-    '--format=esm',
-    '--target=es2020',
-    `--outfile=${scannerOutput}`,
-  ], { cwd: ROOT, stdio: 'inherit' });
-  if (result.error) fail('Build bundle barcode scanner gagal dijalankan.');
-  if (result.status !== 0) fail('Build bundle barcode scanner gagal.');
+  await buildBarcodeScanner(esbuild, scannerOutput);
 }
 
 function makeVersionedAssets(indexHtml, manifest, serviceWorker, buildId) {
@@ -196,9 +199,9 @@ function makeVersionedAssets(indexHtml, manifest, serviceWorker, buildId) {
   return { indexHtml, manifest, serviceWorker };
 }
 
-async function verifyOutput(tempDir) {
+export async function verifyStagingOutput(tempDir) {
   const files = await listFiles(tempDir);
-  const forbiddenPath = /(^|[\\/])(?:\.git|node_modules|supabase|tests|dist-staging-tmp)([\\/]|$)|(^|[\\/])\.env(?:\.[^\\/]*)?$/i;
+  const forbiddenPath = /(^|[\\/])(?:\.git|node_modules|supabase|tests|dist-staging-tmp)([\\/]|$)|(^|[\\/])\.env(?:\.[^\\/]*)?$|(^|[\\/])config\.local(?:\.js|\.example\.js)?$/i;
   if (files.some((file) => forbiddenPath.test(file))) {
     fail('Artefak staging memuat path yang tidak boleh dipublikasikan.');
   }
@@ -221,7 +224,7 @@ async function verifyOutput(tempDir) {
     if (content.includes(PRODUCTION_PROJECT_REF)) {
       fail('Artefak staging memuat referensi project Supabase production.');
     }
-    if (/sb_secret_[A-Za-z0-9_-]+|SUPABASE_SERVICE_ROLE_KEY\s*[:=]\s*['"][^'"]+/i.test(content)) {
+    if (/sb_secret_[A-Za-z0-9_-]+|eyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}|(?:SUPABASE_SERVICE_ROLE_KEY|SUPABASE_SECRET_KEY)\s*[:=]\s*['"][^'"]+/i.test(content)) {
       fail('Artefak staging memuat pola credential backend yang dilarang.');
     }
   }
@@ -259,7 +262,7 @@ export async function buildRenderStaging(env = process.env) {
     await writeFile(path.join(TEMP_DIR, 'index.html'), assets.indexHtml);
     await writeFile(path.join(TEMP_DIR, 'manifest.webmanifest'), `${JSON.stringify(assets.manifest, null, 2)}\n`);
     await writeFile(path.join(TEMP_DIR, 'sw.js'), assets.serviceWorker);
-    await verifyOutput(TEMP_DIR);
+    await verifyStagingOutput(TEMP_DIR);
 
     await rm(OUTPUT_DIR, { recursive: true, force: true });
     await rename(TEMP_DIR, OUTPUT_DIR);
