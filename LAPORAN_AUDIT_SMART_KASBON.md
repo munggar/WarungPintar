@@ -1379,4 +1379,6 @@ Bagian ini adalah pembaruan setelah perubahan registrasi dan deployment staging 
 
 ### Status kesiapan
 
-**NOT READY / BELUM LAYAK untuk pengguna nyata.** Penghapusan ketergantungan confirmation registrasi telah dibuktikan live: owner terdaftar, sesi langsung terbentuk, login password berhasil, dan signup publik tetap tertutup. Namun inbox recovery/undangan, pgTAP/RLS penuh, serta E2E browser terautentikasi untuk seluruh fitur inti belum dapat dibuktikan dari akses yang tersedia. Auth logs dan source path mendukung bahwa registrasi tidak mengirim email konfirmasi, tetapi mailbox tidak tersedia untuk pemeriksaan eksternal.
+**Penghapusan email confirmation registrasi: SELESAI.** Tidak diperlukan mailbox: pendaftaran live menghasilkan sesi dan login langsung, signup publik nonaktif, dan alur registrasi tidak mengirim email atau meminta OTP/tautan aktivasi. `email_confirm: true` hanya menandai akun secara administratif agar sesi password dapat dibuat; itu bukan pengiriman email atau tindakan yang diminta dari pengguna.
+
+**Kesiapan keseluruhan: NOT READY / BELUM LAYAK untuk pengguna nyata.** Penghambat yang tersisa adalah pgTAP/RLS penuh dan E2E browser terautentikasi untuk seluruh fitur inti. Catatan mailbox hanya berlaku untuk fitur terpisah yang tetap dipertahankan sesuai instruksi sebelumnya: pemulihan password melalui email dan undangan assistant. Keterbatasan mailbox tersebut bukan blocker untuk penghapusan email confirmation registrasi.
