@@ -1246,6 +1246,57 @@ Tidak ada email reset yang dikirim, tidak ada akun pengguna nyata yang dipakai, 
 
 Dengan demikian status readiness masih `NOT READY / BELUM SIAP DIGUNAKAN PENGGUNA NYATA`, tetapi bukti yang berhasil dikumpulkan sudah cukup untuk menyatakan bahwa staging hardening, owner registration, tenant membership owner-side listing, dan regresi build/test telah diverifikasi dengan hasil nyata di ekosistem staging yang berwenang.
 
+## Addendum — Status Penghapusan Email Confirmation dan Validasi Lanjutan (14 November 2026)
+
+Bagian ini adalah status terbaru. Temuan historis di atas dipertahankan sebagai catatan, tetapi jika berbeda, addendum ini yang berlaku.
+
+### Perubahan lokal
+
+- `supabase/config.toml` menetapkan `auth.enable_signup = false` dan `auth.email.enable_confirmations = false`.
+- `supabase/functions/register-owner/index.ts` memakai helper registrasi Admin API dan meneruskan `RESET_RATE_LIMIT_SECRET`; signup publik Auth tidak digunakan.
+- `supabase/functions/_shared/registration-security.js` memvalidasi payload, mereservasi undangan email-bound, menerapkan limiter, membuat owner melalui Auth Admin dengan `email_confirm: true` tanpa mengirim email konfirmasi, meminta sesi melalui password grant, lalu mengonsumsi undangan. Jika proses gagal, helper mencoba menghapus akun baru dan melepas reservasi.
+- `email_confirm: true` adalah penetapan administratif, bukan verifikasi kepemilikan mailbox. Kode undangan tetap bearer secret dan harus dibagikan secara privat; kebocoran kode dapat memungkinkan pendaftaran untuk alamat undangan tersebut.
+- `supabase/migrations/202611140001_owner_registration_rate_limit.sql` menambah tabel limiter dengan RLS, akses service-role saja, fungsi `SECURITY DEFINER` dengan `search_path` kosong, fingerprint 64 karakter hex, batas 10 percobaan per email per jam, serta pembersihan bertahap maksimal 50 record lama. Migration bersifat additive; tidak menghapus data atau tabel aplikasi.
+- Baris grant terakhir pada migration telah diperiksa dan berbentuk `grant execute on function public.consume_owner_registration_attempt(text) to service_role;`.
+- `supabase/tests/security_integrity.test.sql` menambahkan pemeriksaan tabel, RLS, dan privilege limiter; declared plan adalah 61.
+- `js/supabase.js` dan `js/app.js` menyimpan sesi registrasi langsung, menghapus marker/callback signup lama, dan memberikan fallback login bila sesi tidak tersedia.
+- Regression tests baru ada di `tests/registration-security.test.js` dan `tests/registration-client.test.js`. README diperbarui untuk alur Auth dan recovery email yang benar.
+
+### Hasil validasi
+
+| Pemeriksaan | Hasil | Batas bukti |
+|---|---|---|
+| `npm test` | **PASS — 63/63** | Unit/regression tests; tidak menjalankan transaksi database staging atau sesi pengguna nyata. |
+| `npm run build` | **PASS** | Build bundle frontend. |
+| Build staging dengan config lokal dan identitas Render | **PASS**, build `3dd2ffad592c`; project ref dan service identity tervalidasi. | Artefak lokal, bukan deployment baru. |
+| `npm run config:check` | **PASS**, URL/ref mengarah ke Supabase staging. | Validasi konfigurasi lokal. |
+| Syntax check JS dan esbuild Edge Function `register-owner` | **PASS** | Bukan Deno runtime/deployment. |
+| `npm audit --omit=dev` | **PASS — 0 vulnerabilities** | Audit dependency produksi. |
+| `git diff --check` | **PASS** | Hanya peringatan konversi line ending CRLF dari Git. |
+| Hosted Auth settings API | **PASS — HTTP 200**; `disable_signup=true`, `mailer_autoconfirm=true`, email/password provider aktif. | Memverifikasi konfigurasi Auth staging; bukan bukti registrasi sukses. |
+| Auth config diff | Tidak ada perubahan Auth tertunda setelah konfigurasi signup dipush. Email confirmation tidak berbeda dari config lokal. | Beberapa properti remote-only tidak dideklarasikan dan dibiarkan apa adanya. |
+| CORS preflight `register-owner` dan `reset-password` | **PASS — HTTP 200** untuk origin frontend staging. | Hanya preflight. |
+| Payload malformed registrasi dan recovery | **PASS — HTTP 400**; invite invalid ditolak **HTTP 403**. | Tidak membuat akun, mengirim email, atau membuktikan sesi. |
+| `invite-assistant`, `assistant-access`, `smart-kasbon` tanpa JWT | **PASS — HTTP 401**. | Tidak membuktikan otorisasi role dengan sesi valid. |
+| Browser frontend staging desktop 1440×900 dan mobile 390×844 | Form owner menampilkan undangan; tidak ditemukan pesan/resend konfirmasi; tidak ada horizontal overflow. | Browser memakai versi deployment yang sudah ada, bukan perubahan lokal terbaru. |
+| Login fixture owner A, assistant A, owner B | **BLOCKED**; ketiganya menolak kredensial lokal dengan HTTP 400. | Tidak ada sesi valid untuk uji role atau tenant isolation. |
+| Registrasi sukses, sesi langsung, dan login setelah registrasi | **BLOCKED**. | Belum ada undangan valid untuk dummy account; function lokal belum dideploy. |
+| Email recovery/assistant invitation | **BLOCKED**. | Tidak ada mailbox yang dapat diakses; tidak ada email yang dinyatakan terkirim/diterima. |
+| RLS, pgTAP, role escalation, race condition, isolasi Toko A/B | **BLOCKED**. | Koneksi database staging gagal autentikasi dan akun tidak valid. |
+
+### Migration dan deployment staging
+
+- `npx supabase db push --remote=unkmykhwddwhbtuioqrg --dry-run` telah dicoba memakai nilai lokal `SUPABASE_DB_PASSWORD` tanpa mencetaknya. PostgreSQL menolak koneksi dengan `SQLSTATE 28P01` (`password authentication failed`). Prompt input tersembunyi tidak tersedia karena PowerShell berjalan dalam mode non-interaktif.
+- Karena dry-run tidak dapat membaca riwayat database, **belum dapat dipastikan bahwa hanya `202611140001_owner_registration_rate_limit.sql` yang tertunda**. Migration tidak diterapkan.
+- Fungsi `register-owner` staging masih versi **3** dan belum memuat perubahan lokal; jangan deploy sebelum migration berhasil diterapkan. `reset-password` staging terdaftar versi **4**; empat fungsi lain juga terdaftar ACTIVE.
+- Konfigurasi Auth signup publik sudah diperbarui pada project `unkmykhwddwhbtuioqrg` saja. Tidak ada command yang menargetkan production `skvskjrhhekwvkwuxjec`.
+- Perubahan source terbaru belum dipush ke branch `staging`, sehingga Render belum menerima build baru. Push frontend sekarang ditahan agar tidak mendahului deployment backend yang mensyaratkan migration.
+- Variabel mailbox test lokal tidak menunjuk ke URL mailbox atau alamat email yang dapat diuji. Tidak ada email recovery/undangan yang dikirim selama probe.
+
+### Status kesiapan
+
+**NOT READY / BELUM SIAP DIGUNAKAN PENGGUNA NYATA.** Bukti lokal dan konfigurasi Auth menunjukkan konfirmasi email registrasi tidak diperlukan dan signup publik ditutup. Namun registrasi sukses dengan sesi, login valid, pengiriman email recovery/undangan, izin role, integritas database, dan isolasi tenant belum dibuktikan. Hambatan langsung adalah kredensial koneksi PostgreSQL staging yang ditolak; karena itu migration belum diterapkan dan fungsi/frontend yang bergantung padanya belum dideploy. Smart Kasbon tetap rule-based, bukan machine learning; uji database dan hasil prediksinya juga belum dibuktikan secara runtime.
+
 ## Addendum final - verifikasi staging 2026-11-14
 
 Bagian ini adalah hasil pemeriksaan terbaru dan menjadi status otoritatif untuk deployment setelah pemeriksaan sebelumnya.
@@ -1283,3 +1334,48 @@ Bagian ini adalah hasil pemeriksaan terbaru dan menjadi status otoritatif untuk 
 ### Keputusan kesiapan
 
 **BELUM SIAP untuk pengguna nyata.** Perbaikan reset password telah berada di frontend staging dan Edge Function staging, serta push dan deployment frontend terverifikasi. Namun, login owner/assistant, email undangan/reset, akses mailbox, isolasi tenant live, dan pgTAP/RLS database masih belum terbukti. Sebelum readiness dapat dinaikkan, sediakan `.env.test.local` berisi akun dummy staging yang valid dan mailbox testing yang dapat diakses, serta perbaiki akses password database project staging; lalu ulangi browser E2E dan uji isolasi tanpa menyentuh production.
+
+## Penghapusan Email Confirmation Permanen
+
+Bagian ini adalah pembaruan setelah perubahan registrasi dan deployment staging pada branch `staging`. Bagian ini menggantikan status registrasi pada addendum sebelumnya, tetapi tidak menghapus temuan dan batas bukti historis.
+
+### Perubahan yang diterapkan
+
+- `supabase/config.toml` menonaktifkan signup publik dan email confirmation (`enable_signup = false`, `enable_confirmations = false`). Hosted Auth staging terverifikasi dengan `disable_signup=true` dan `mailer_autoconfirm=true`; konfigurasi remote tidak menunjukkan perubahan Auth yang tertunda.
+- `supabase/functions/register-owner/index.ts` sekarang memakai Auth Admin setelah undangan email-bound dan limiter lolos. Akun dibuat dengan `email_confirm: true` secara administratif, lalu sesi diperoleh lewat password grant. Jalur ini tidak menggunakan `signUp`, `inviteUserByEmail`, OTP konfirmasi, atau pengiriman email aktivasi. `email_confirm: true` tidak membuktikan kepemilikan mailbox.
+- `supabase/functions/_shared/registration-security.js` memvalidasi payload, reservasi dan konsumsi undangan, pembatasan percobaan, pembuatan akun unik, sesi langsung, serta cleanup akun/reservasi bila proses gagal.
+- `supabase/migrations/202611140001_owner_registration_rate_limit.sql` menambahkan tabel limiter RLS-protected dan fungsi yang hanya dapat dieksekusi `service_role`; batasnya 10 percobaan per fingerprint email per jam.
+- `js/supabase.js` menghapus marker dan callback signup lama, menyimpan sesi segera, serta memakai password grant untuk login. `js/app.js` menghapus fallback menunggu email dan memberi pesan login yang jelas bila sesi registrasi tidak tersedia.
+- Regression tests ditambahkan di `tests/registration-security.test.js` dan `tests/registration-client.test.js`; `supabase/tests/security_integrity.test.sql` memeriksa RLS dan privilege limiter. README menjelaskan undangan owner, session langsung, password recovery, dan undangan assistant yang tetap terpisah.
+
+### Hasil pengujian dan deployment
+
+| Pemeriksaan | Hasil |
+|---|---|
+| `npm test` | **PASS — 63/63** |
+| `npm run build` | **PASS** |
+| `npm run build:staging` dan `npm run config:check` | **PASS**; build `d9b80e8b5c38`, mengarah ke project staging yang disetujui. |
+| `npm audit --omit=dev` | **PASS — 0 vulnerabilities** |
+| `git diff --check` | **PASS** |
+| Hosted Auth settings | **PASS**; signup publik nonaktif, auto-confirm aktif, provider email/password tersedia. |
+| Migration history sebelum perubahan | Lima migration lokal cocok dengan lima versi remote; hanya `202611140001_owner_registration_rate_limit.sql` yang tertunda. |
+| Migration dan limiter staging | Migration diterapkan; history kini berisi keenam versi lokal. Table dan fungsi tersedia, RLS aktif, anon/authenticated tidak dapat membaca tabel atau memanggil fungsi, dan `service_role` dapat menjalankannya. Uji live mengizinkan percobaan 1–10 dan menolak percobaan ke-11; fingerprint uji dibersihkan. |
+| Registrasi live dengan undangan sekali pakai | **PASS — HTTP 200**; session access/refresh langsung tersedia, login password langsung berhasil, role owner terbentuk, dan konfigurasi Auth menolak signup publik. Akun serta undangan dummy dihapus setelah tes; jumlah akun staging kembali ke 5, dengan 0 akun belum terkonfirmasi. |
+| Proteksi input live | Password lemah ditolak **HTTP 400**; invite invalid dengan role override ditolak **HTTP 403**. |
+| Auth logs | Tidak ditemukan pola event mailer/confirmation pada log Auth yang diperiksa setelah smoke test. Kode registrasi juga tidak memanggil alur pengiriman email. Ini bukan pengganti pemeriksaan inbox. |
+| Edge Function | `register-owner` aktif versi **4** pada `unkmykhwddwhbtuioqrg`; tidak ada function lain yang dideploy pada perubahan ini. |
+| Frontend Render staging | Commit `c0d99c4` dipush ke `staging`; asset live mengandung fallback sesi baru dan tidak lagi mengandung error lama yang meminta menonaktifkan konfirmasi email. Browser menampilkan formulir undangan tanpa aktivasi/resend; pada lebar mobile 390 CSS px tidak ada horizontal overflow. |
+| Render service configuration | Perubahan live setelah push menunjukkan deployment staging berjalan. Dashboard Render mengarahkan ke login, sehingga pengaturan repository/service dan toggle Auto-Deploy tidak dapat dibaca langsung. |
+| Akun lama | Sebelum smoke test: 5 akun, 0 belum terkonfirmasi. Tidak ada akun lama yang dihapus atau diubah massal. |
+
+### Jalur migration dan batas pemeriksaan email
+
+- `supabase db push --dry-run` dan `supabase migration repair` tidak dapat tersambung melalui PostgreSQL karena password lokal ditolak (`SQLSTATE 28P01`). Karena itu dry-run CLI tidak diklaim berhasil.
+- Sebagai alternatif, riwayat database dibaca secara read-only lewat Supabase Management API dan memastikan hanya satu migration lokal yang tertunda. Migration additive tersebut diterapkan dengan `supabase db query --file` ke ref `unkmykhwddwhbtuioqrg`; setelah perintah repair resmi tertahan oleh password yang sama, versi/name dicatat dalam `supabase_migrations.schema_migrations` melalui query Management API dengan kolom `statements` kosong. History sudah menandai versi sebagai applied, tetapi pencatatan manual ini perlu diganti/ditinjau lewat `supabase migration repair` setelah password database yang sah tersedia. Jangan menjalankan migration ini pada project lain.
+- Tidak ada inbox/mailbox testing yang dapat diakses dari kredensial lokal atau tool yang tersedia. Maka penerimaan email reset password dan undangan assistant belum diuji. Fitur tersebut tidak dihapus: reset password tetap melalui tautan email dan `reset-password`; undangan assistant tetap melalui `inviteUserByEmail`. Tidak ada email recovery/assistant yang dikirim dalam smoke test ini.
+- Uji pgTAP lengkap, seluruh RLS aplikasi, transaksi/stock E2E, dan seluruh alur browser owner/assistant belum dijalankan pada sesi yang valid. Pemeriksaan isolasi tenant dan role fixture dari verifikasi sebelumnya menunjukkan akses lintas toko ditolak, tetapi belum menggantikan keseluruhan E2E pengguna.
+- Project production `skvskjrhhekwvkwuxjec` tidak ditargetkan atau diubah.
+
+### Status kesiapan
+
+**NOT READY / BELUM LAYAK untuk pengguna nyata.** Penghapusan ketergantungan confirmation registrasi telah dibuktikan live: owner terdaftar, sesi langsung terbentuk, login password berhasil, dan signup publik tetap tertutup. Namun inbox recovery/undangan, pgTAP/RLS penuh, serta E2E browser terautentikasi untuk seluruh fitur inti belum dapat dibuktikan dari akses yang tersedia. Auth logs dan source path mendukung bahwa registrasi tidak mengirim email konfirmasi, tetapi mailbox tidak tersedia untuk pemeriksaan eksternal.
