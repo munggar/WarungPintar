@@ -1,9 +1,17 @@
 import { SUPABASE_PUBLISHABLE_KEY, SUPABASE_URL } from './config.js';
 
 const SESSION_KEY = 'warungpintar:supabase-session';
-const NEW_REGISTRATION_KEY = 'warungpintar:new-registration-email';
 const BASE_URL = SUPABASE_URL.replace(/\/+$/, '');
 let session = null;
+
+export class SupabaseRequestError extends Error {
+  constructor(message, status = null, code = '') {
+    super(message);
+    this.name = 'SupabaseRequestError';
+    this.status = status;
+    this.code = code;
+  }
+}
 
 function savedSession() {
   if (session) return session;
@@ -36,7 +44,11 @@ async function request(path, options = {}, retry = true) {
     response = await fetch(`${BASE_URL}${path}`, { ...fetchOptions, headers });
   } catch (error) {
     if (path === '/functions/v1/register-owner' && error instanceof TypeError) {
-      throw new Error('Tidak dapat menghubungi fungsi pendaftaran. Deploy register-owner ke project Supabase dengan `npx supabase functions deploy register-owner`, lalu coba lagi.');
+      throw new SupabaseRequestError(
+        'Hasil pendaftaran belum dapat dipastikan karena koneksi terputus. Coba masuk dengan email dan kata sandi; jika akun belum tersedia, ulangi pendaftaran.',
+        null,
+        'registration_outcome_unknown',
+      );
     }
     if (path === '/functions/v1/reset-password' && error instanceof TypeError) {
       throw new Error('Fungsi reset-password belum dapat dihubungi. Pastikan fungsi sudah dideploy dan secret APP_URL di Supabase sama persis dengan URL HTTPS aplikasi, lalu coba lagi.');
@@ -66,7 +78,7 @@ async function request(path, options = {}, retry = true) {
       : result?.code === 'PGRST205'
       ? 'Tabel database WarungPintar belum dibuat. Jalankan berkas supabase/migrations/202610210001_warungpintar.sql melalui Supabase Dashboard > SQL Editor, lalu login kembali. Migration tersebut juga menyiapkan toko untuk akun Auth yang sudah terdaftar.'
       : result?.msg || result?.message || result?.error_description || result?.error || `Supabase menolak permintaan (${response.status}).`;
-    throw new Error(message);
+    throw new SupabaseRequestError(message, response.status, result?.code || result?.error_code || '');
   }
   return { result, headers: response.headers };
 }
@@ -82,18 +94,8 @@ export async function register(email, password, storeName, inviteCode) {
       invite_code: inviteCode,
     }),
   }, false);
-  localStorage.setItem(NEW_REGISTRATION_KEY, email.trim().toLowerCase());
-  if (result?.access_token) saveSession(result);
+  if (result?.access_token && result?.refresh_token) saveSession(result);
   return result;
-}
-
-export function isNewRegistration(email) {
-  const registeredEmail = localStorage.getItem(NEW_REGISTRATION_KEY);
-  return registeredEmail === email.trim().toLowerCase();
-}
-
-export function clearNewRegistration(email) {
-  if (isNewRegistration(email)) localStorage.removeItem(NEW_REGISTRATION_KEY);
 }
 
 export async function login(email, password) {
@@ -121,11 +123,6 @@ export async function restoreSession() {
   const callback = new URLSearchParams(location.hash.replace(/^#/, ''));
   if (callback.has('access_token') && callback.has('refresh_token')) {
     const type = callback.get('type');
-    if (type === 'signup') {
-      saveSession(null);
-      history.replaceState(null, '', location.pathname + location.search);
-      return null;
-    }
     current = {
       access_token: callback.get('access_token'),
       refresh_token: callback.get('refresh_token'),

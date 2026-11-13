@@ -6,3 +6,9 @@ verify_jwt = false
 
 [functions.smart-kasbon]
 verify_jwt = true
+
+[auth]
+enable_signup = false
+
+[auth.email]
+enable_confirmations = false

@@ -1,9 +1,10 @@
 begin;
 
-select plan(55);
+select plan(61);
 
 select has_table('public', 'owner_registration_invites', 'owner invite table exists');
 select has_table('public', 'password_reset_attempts', 'persistent reset limiter table exists');
+select has_table('public', 'owner_registration_attempts', 'persistent owner registration limiter table exists');
 select ok(
   (select relrowsecurity from pg_class where oid = 'public.owner_registration_invites'::regclass),
   'owner invite table has RLS enabled'
@@ -12,10 +13,21 @@ select ok(
   (select relrowsecurity from pg_class where oid = 'public.password_reset_attempts'::regclass),
   'reset limiter table has RLS enabled'
 );
+select ok(
+  (select relrowsecurity from pg_class where oid = 'public.owner_registration_attempts'::regclass),
+  'owner registration limiter table has RLS enabled'
+);
 select ok(not has_table_privilege('anon', 'public.owner_registration_invites', 'SELECT'), 'anon cannot read owner invites');
 select ok(not has_table_privilege('authenticated', 'public.owner_registration_invites', 'SELECT'), 'authenticated cannot read owner invites');
 select ok(not has_table_privilege('anon', 'public.password_reset_attempts', 'SELECT'), 'anon cannot read reset attempts');
 select ok(not has_table_privilege('authenticated', 'public.password_reset_attempts', 'SELECT'), 'authenticated cannot read reset attempts');
+select ok(not has_table_privilege('anon', 'public.owner_registration_attempts', 'SELECT'), 'anon cannot read registration attempts');
+select ok(not has_table_privilege('authenticated', 'public.owner_registration_attempts', 'SELECT'), 'authenticated cannot read registration attempts');
+select ok(
+  has_function_privilege('service_role', 'public.consume_owner_registration_attempt(text)', 'EXECUTE'),
+  'service role can consume registration attempts'
+);
+select ok(not has_function_privilege('anon', 'public.consume_owner_registration_attempt(text)', 'EXECUTE'), 'anon cannot consume registration attempts');
 select ok(has_function_privilege('service_role', 'public.consume_password_reset_attempt(text)', 'EXECUTE'), 'service role can use reset limiter');
 select ok(not has_function_privilege('anon', 'public.consume_password_reset_attempt(text)', 'EXECUTE'), 'anon cannot use reset limiter');
 select ok(not has_function_privilege('authenticated', 'public.resolve_password_reset_target(text)', 'EXECUTE'), 'authenticated cannot resolve reset accounts');
@@ -111,10 +123,10 @@ set window_started_at = now() - interval '2 hours'
 where email_hash = repeat('a', 64);
 select ok(public.consume_password_reset_attempt(repeat('a', 64)), 'reset attempts are allowed after the window expires');
 
-insert into auth.users (id, email, encrypted_password, email_confirmed_at, raw_user_meta_data)
+insert into auth.users (id, email, encrypted_password, raw_user_meta_data)
 values
-  ('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', 'kasbon-owner-a@invalid.test', '', now(), '{"store_name":"Audit A"}'),
-  ('bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb', 'kasbon-owner-b@invalid.test', '', now(), '{"store_name":"Audit B"}');
+  ('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', 'kasbon-owner-a@invalid.test', '', '{"store_name":"Audit A"}'),
+  ('bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb', 'kasbon-owner-b@invalid.test', '', '{"store_name":"Audit B"}');
 
 update test_security_context context
 set store_a = member.store_id
@@ -142,8 +154,8 @@ select is(
 insert into public.store_invites (store_id, email, invited_by, expires_at)
 select store_a, 'kasbon-assistant-a@invalid.test', owner_a, now() + interval '1 hour'
 from test_security_context;
-insert into auth.users (id, email, encrypted_password, email_confirmed_at)
-values ('cccccccc-cccc-4ccc-8ccc-cccccccccccc', 'kasbon-assistant-a@invalid.test', '', now());
+insert into auth.users (id, email, encrypted_password)
+values ('cccccccc-cccc-4ccc-8ccc-cccccccccccc', 'kasbon-assistant-a@invalid.test', '');
 
 insert into public.store_data (
   store_id, ciphertext, iv, recovery_salt, recovery_iv, recovery_wrapped_key, updated_by

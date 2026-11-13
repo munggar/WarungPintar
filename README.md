@@ -168,7 +168,7 @@ Remove-Variable resetSecret
 
 Ganti nilai `APP_URL` dengan origin HTTPS aplikasi Anda jika domain Render berbeda. Nilai ini harus sama persis dengan **Site URL** pada Supabase Authentication → URL Configuration dan origin yang membuka aplikasi. Untuk pengembangan lokal, ubah sementara nilainya ke `http://localhost:8080`; fungsi juga menerima `http://localhost` dan `http://127.0.0.1` pada port apa pun.
 
-Terapkan migration `202611130001_registration_and_recovery_security.sql` setelah migration toko awal dan sebelum deploy `register-owner`/`reset-password`. Periksa urutan migration dan project reference; jangan jalankan pada production tanpa persetujuan serta backup.
+Terapkan migration `202611130001_registration_and_recovery_security.sql` dan `202611140001_owner_registration_rate_limit.sql` setelah migration toko awal dan sebelum deploy `register-owner`/`reset-password`. Periksa urutan migration dan project reference; jangan jalankan pada production tanpa persetujuan serta backup.
 
 Setelah migration berhasil diterapkan pada target yang telah diverifikasi, deploy fungsi:
 
@@ -182,15 +182,22 @@ npx supabase functions deploy smart-kasbon
 
 Fungsi `reset-password` menerima pemulihan tanpa sesi login dan memverifikasi kunci pemulihan sebelum mengubah kata sandi. Karena itu, `supabase/config.toml` menonaktifkan verifikasi JWT gateway untuk fungsi ini; jangan menghapus pemeriksaan kunci pemulihan di fungsi tersebut.
 
-`RESET_RATE_LIMIT_SECRET` wajib diisi dengan secret acak minimal 32 karakter; fungsi menggunakannya sebagai HMAC key, bukan menyimpan email mentah pada tabel pembatasan. Jangan memakai contoh placeholder, membagikan secret, atau memasukkannya ke repository. Setelah penerapan migration keamanan akun, fungsi membatasi 10 percobaan pemulihan per alamat per jam. Tanggapan untuk email/kunci yang tidak cocok, akun tidak ditemukan, dan permintaan yang dibatasi dibuat sama untuk mencegah account enumeration.
+`RESET_RATE_LIMIT_SECRET` wajib diisi dengan secret acak minimal 32 karakter; fungsi menggunakannya sebagai HMAC key, bukan menyimpan email mentah pada tabel pembatasan. Jangan memakai contoh placeholder, membagikan secret, atau memasukkannya ke repository. Migration `202611130001_registration_and_recovery_security.sql` dan `202611140001_owner_registration_rate_limit.sql` masing-masing membatasi pemulihan password dan pendaftaran owner hingga 10 percobaan per email per jam. Kedua limiter memakai fingerprint yang dikunci HMAC dan tabel terpisah. Tanggapan reset untuk email/kunci yang tidak cocok, akun tidak ditemukan, dan permintaan yang dibatasi dibuat sama untuk mencegah account enumeration.
 
 Fungsi `smart-kasbon` memerlukan sesi JWT dan keanggotaan toko yang valid. Konfigurasinya mempertahankan verifikasi JWT gateway. Fungsi ini hanya dapat digunakan setelah migrasi Smart Kasbon diterapkan.
 
-### 4. Aktifkan autentikasi
+### 4. Konfigurasi autentikasi
 
-Aktifkan penyedia autentikasi email dan kata sandi pada Supabase Auth dan **nonaktifkan Confirm email**. Pendaftaran memerlukan kode undangan owner satu kali yang terikat ke alamat email; akun dibuat melalui Auth `signUp` dan tidak meminta tautan/verifikasi email. Jika Confirm email aktif, fungsi menolak menyelesaikan pendaftaran dan membersihkan akun sementara.
+Konfigurasi staging di `supabase/config.toml` menonaktifkan signup publik (`auth.enable_signup = false`) dan email confirmation (`auth.email.enable_confirmations = false`). Terapkan dan periksa konfigurasi hosted staging secara eksplisit:
 
-Terapkan migration `202611130001_registration_and_recovery_security.sql`, lalu terbitkan undangan untuk setiap owner melalui Supabase SQL Editor sebagai administrator:
+```bash
+npx supabase config diff --remote=unkmykhwddwhbtuioqrg
+npx supabase config push --remote=unkmykhwddwhbtuioqrg
+```
+
+Owner hanya dibuat oleh Edge Function `register-owner` setelah kode undangan satu kali terikat-email tervalidasi dan rate limit lolos. Fungsi membuat user melalui Auth Admin dengan `email_confirm: true` (tanpa mengirim email), lalu langsung meminta sesi password; tidak ada confirmation email atau OTP. Signup langsung melalui endpoint publik Auth tetap dinonaktifkan agar tidak melewati undangan. Undangan assistant tetap dikirim terpisah melalui `inviteUserByEmail`; password recovery tetap menggunakan tautan email oleh function `reset-password`.
+
+Terapkan kedua migration keamanan akun di atas sebelum deploy `register-owner`. Setelah migration berhasil, terbitkan undangan untuk setiap owner melalui Supabase SQL Editor sebagai administrator:
 
 ```sql
 select public.create_owner_registration_invite('pemilik@example.com');
@@ -198,7 +205,7 @@ select public.create_owner_registration_invite('pemilik@example.com');
 
 Salin kode acak yang dikembalikan dan bagikan kepada orang yang disetujui melalui kanal privat. Kode berlaku 7 hari, terikat ke email tersebut, dan hanya dapat dipakai sekali. Menerbitkan kode baru untuk email yang sama akan membatalkan kode sebelumnya. Kode undangan adalah bearer secret: kebocorannya memungkinkan pihak lain yang memegang kode membuat akun dengan alamat yang disetujui. Karena aplikasi tidak memverifikasi email, kode ini **bukan bukti kepemilikan mailbox**; jangan memperlakukan alamat email sebagai identitas yang sudah diverifikasi. Untuk skala terbuka, pertimbangkan verifikasi nomor telepon atau proses persetujuan identitas terpisah.
 
-Atur kebijakan kata sandi minimal 8 karakter pada Supabase Authentication agar persyaratan tersebut juga diterapkan oleh server. Jangan mengaktifkan Confirm email untuk menghindari pengiriman verification link; aplikasi tetap mensyaratkan kode undangan.
+Atur kebijakan kata sandi minimal 8 karakter pada Supabase Authentication agar persyaratan tersebut juga diterapkan oleh server. Jangan mengaktifkan signup publik atau email confirmation pada hosted staging; owner tetap harus memakai kode undangan.
 
 ### 5. Instal dependensi dan jalankan server
 
@@ -218,13 +225,13 @@ Setelah build selesai, jalankan salah satu server berikut:
 
 ### 6. Buka aplikasi
 
-Buka `http://localhost:8080` dan daftarkan akun pemilik menggunakan email, nama toko, kata sandi minimal 8 karakter, dan kode undangan yang telah diterbitkan admin. Fungsi `register-owner` membuat sesi tanpa tautan verifikasi email. Terapkan ulang fungsi tersebut setelah ada perubahan kode.
+Buka `http://localhost:8080` dan daftarkan akun pemilik menggunakan email, nama toko, kata sandi minimal 8 karakter, dan kode undangan yang telah diterbitkan admin. Fungsi `register-owner` membuat akun melalui Auth Admin dan mengembalikan sesi password langsung; user tidak perlu mengaktivasi email. Terapkan ulang fungsi tersebut setelah ada perubahan kode.
 
 Jika muncul pesan `Failed to fetch`, pastikan fungsi telah diterapkan pada proyek Supabase yang sesuai dengan konfigurasi di `js/config.js`.
 
 Simpan kunci pemulihan saat ditampilkan. Kunci tersebut tidak disimpan di server. Jika dibutuhkan oleh asisten, bagikan melalui saluran komunikasi yang aman.
 
-Pemulihan kata sandi dilakukan pada formulir **Lupa kata sandi** tanpa tautan email: masukkan email akun, kunci pemulihan, dan kata sandi baru. Edge Function `reset-password` harus dideploy bersama migration keamanan akun dan `RESET_RATE_LIMIT_SECRET`. Aplikasi menampilkan hasil generik dan tidak otomatis masuk; jika pasangan email/kunci cocok, masuk kembali dengan kata sandi baru. Kunci pemulihan yang dibuat aplikasi memiliki 160 bit acak dan harus disimpan secara terpisah.
+Pemulihan kata sandi dimulai pada formulir **Lupa kata sandi** dengan meminta tautan ke email akun. Kunci pemulihan hanya membuka vault terenkripsi dan tidak dapat mengubah kata sandi. Setelah membuka tautan recovery, pengguna menetapkan password baru. Edge Function `reset-password` harus dideploy bersama migration keamanan akun dan `RESET_RATE_LIMIT_SECRET`. Aplikasi menampilkan hasil generik dan tidak otomatis masuk. Kunci pemulihan yang dibuat aplikasi memiliki 160 bit acak dan harus disimpan secara terpisah.
 
 **Catatan akun dan data awal:** pendaftaran akun autentikasi dan pembuatan tabel merupakan proses yang berbeda. Periksa akun melalui Supabase Dashboard → **Authentication → Users**, bukan Table Editor. Jika alamat email sudah terdaftar, gunakan akun yang ada atau hapus akun melalui Dashboard sebelum mendaftar kembali. Setelah migrasi dijalankan, pengisian awal akan membuat toko dan keanggotaan pemilik untuk akun autentikasi yang sudah ada.
 
@@ -332,7 +339,7 @@ Skema Supabase mencakup `stores`, `store_members`, `store_invites`, `store_data`
 | Halaman kosong atau aplikasi gagal dimulai | Pastikan aplikasi dijalankan melalui server web, bukan `file://`. Coba keluar dari mode privat browser. |
 | Pemindai barcode tidak berfungsi | Jalankan `npm run build`. Sebagai alternatif, cari produk atau gunakan pemindai eksternal melalui kolom Kasir. |
 | Kode pendaftaran ditolak | Pastikan kode belum dipakai/kedaluwarsa dan email yang dimasukkan sama dengan email undangan. Minta admin menerbitkan kode baru. |
-| Pendaftaran tidak membuat sesi | Pastikan Supabase Auth → Providers → Email → Confirm email dinonaktifkan; aplikasi tidak mengirim verification link. |
+| Pendaftaran tidak membuat sesi | Periksa `auth.enable_signup = false` dan `auth.email.enable_confirmations = false` pada konfigurasi hosted, lalu deploy versi Edge Function `register-owner` yang terbaru. Periksa juga status sesi password setelah pembuatan akun. |
 | Akun tidak terlihat di Table Editor | Akun berada di Authentication → Users. Pastikan migrasi basis data telah dijalankan. |
 | Tabel `stores` tidak ditemukan | Jalankan migrasi SQL melalui Supabase Dashboard → SQL Editor, pastikan proses berhasil, lalu coba masuk kembali. |
 | Undangan gagal atau terjadi masalah CORS | Deploy Edge Functions yang diperlukan dan pastikan secret `APP_URL` sama dengan origin aplikasi. |

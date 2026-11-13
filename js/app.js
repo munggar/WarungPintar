@@ -390,7 +390,6 @@ async function activateAccount(account, { syncRemote = false, rememberDevice = t
 
 async function completeLogin(password, recoveryCode = '', options = {}) {
   const result = await cloud.connect(password, recoveryCode, options);
-  if (options.registeredEmail) supabase.clearNewRegistration(options.registeredEmail);
   if (result.recoveryCode && !(await showRecoveryCode(result.recoveryCode))) {
     await cloud.disconnect();
     S.authFlow = null;
@@ -438,19 +437,23 @@ async function submitAuth(form) {
         String(values.storeName || '').trim(),
         String(values.inviteCode || '').trim(),
       );
-      if (!result?.access_token) {
+      if (!result?.access_token || !result?.refresh_token) {
         S.authMode = 'login';
-        return renderAuth('Akun berhasil dibuat, tetapi sesi belum terbentuk. Pastikan Edge Function register-owner telah di-deploy ke proyek Supabase.');
+        return renderAuth('Pendaftaran belum memberikan sesi aktif. Coba masuk dengan email dan kata sandi; jika akun belum tersedia, ulangi pendaftaran.');
       }
-      await completeLogin(password, recovery, { startEmpty: true, registeredEmail: email });
+      await completeLogin(password, recovery, { startEmpty: true });
       return;
-    } else {
-      await supabase.login(email, password);
     }
-    const newRegistration = supabase.isNewRegistration(email);
-    await completeLogin(password, recovery, { startEmpty: newRegistration, registeredEmail: newRegistration ? email : '' });
+    await supabase.login(email, password);
+    await completeLogin(password, recovery);
   } catch (error) {
     console.error(error);
+    if (S.authMode === 'register'
+      && error instanceof supabase.SupabaseRequestError
+      && ['registration_session_unavailable', 'registration_outcome_unknown'].includes(error.code)) {
+      S.authMode = 'login';
+      return renderAuth('Pendaftaran belum dapat dipastikan. Coba masuk; jika akun belum tersedia, ulangi pendaftaran setelah gangguan teratasi.');
+    }
     renderAuth('');
     toast(error.message, 'err');
   }
