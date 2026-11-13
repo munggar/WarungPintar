@@ -209,17 +209,16 @@ Pengaruh laba, omzet, margin, arus kas, tren, kas, cadangan, modal kerja, kewaji
 
 ## 5. Implementasi Machine Learning
 
-**Machine Learning belum diimplementasikan.**
+Pipeline ML advisory kini diimplementasikan pada source dan Edge Function staging, tetapi **belum ada model yang dapat dilatih atau dipakai**. Query agregat staging pada 14 November 2026 menunjukkan 0 kasbon, 0 pembayaran, dan 0 model. Karena itu tidak ada artifact atau metrik bisnis; status tetap cold start.
 
-- **Algoritma:** tidak ada algoritma ML yang digunakan.
-- **File model:** tidak ada file model terlatih. Migration hanya menyiapkan tabel `smart_kasbon_model_versions` dengan kolom `model`, `metrics`, `training_count`, `evaluation_count` dan `state`.
-- **Dataset:** tidak ada dataset pelatihan/evaluasi yang digunakan atau tersedia sebagai bukti dalam repository.
-- **Fitur input, target, training, evaluasi, dan metrik aktual:** tidak ada untuk ML.
-- **Cold start:** rule-based; snapshot tanpa transaksi dalam 30 hari memberi label `cold_start` dan faktor kesehatan 0,1. Skor risiko pelanggan awal 60 / kategori sedang saat belum ada riwayat pelunasan.
-- **Fallback:** keputusan tetap memakai aturan SQL. Ini bukan fallback model ML, karena tidak ada model aktif.
-- **Pemakaian pada keputusan:** tidak digunakan. `evaluate_model` pada Edge Function mengembalikan `state: unavailable` dan alasan data historis/holdout belum cukup. Dashboard memberi state `cold_start` bila belum ada baris model.
-
-Kolom `decision_features` dan tabel model merupakan penyimpanan/kerangka data, bukan bukti bahwa model sudah dilatih atau dipakai.
+- **Algoritma:** logistic regression dengan preprocessing/standardisasi numerik yang disimpan bersama artifact.
+- **Label:** pelunasan penuh dari pembayaran yang tercatat sampai akhir tanggal jatuh tempo WIB. Pembayaran setelah cutoff dan pinjaman yang belum matang tidak dipakai sebagai label.
+- **Fitur:** nominal log, tenor, skor/kelas kesehatan, dan snapshot metrics pada saat server menerbitkan kasbon. ID pelanggan hanya digunakan untuk split group; tidak masuk ke fitur atau artifact.
+- **Evaluasi:** holdout kronologis 80/20 dan mengecualikan pelanggan holdout yang muncul di training. Minimum: 100 baris training, 40 evaluasi, 25 contoh tiap kelas training, 10 tiap kelas evaluasi, serta 10 pelanggan evaluasi independen.
+- **Aktivasi:** kandidat disimpan sebagai `shadow`; aktivasi manual oleh owner hanya diizinkan bila PR-AUC mengungguli baseline, Brier score lebih rendah, dan expected calibration error ≤ 0,1. Ini guard teknis, bukan jaminan performa/statistical assurance.
+- **Batas tenancy dan beban:** query selalu disaring oleh `store_id`, satu proses dibatasi 10.000 kasbon/50.000 pembayaran, dan pelatihan dibatasi satu kali per toko per 24 jam.
+- **Keputusan:** model tidak mengubah approval, limit, atau guard SQL. Prediksi hanya advisory; jika tidak aktif/data tidak cukup, aturan yang ada tetap menentukan transaksi.
+- **Bukti performa:** test fixture sintetis hanya menguji mekanisme dan determinisme; tidak dipakai melatih staging, membuat artifact, atau mengklaim akurasi bisnis.
 
 ## 6. Database dan Ledger
 
@@ -1427,3 +1426,54 @@ Addendum ini mencatat keputusan terbaru untuk menghapus seluruh jalur email kelu
 - Tidak ada perubahan pada project production `skvskjrhhekwvkwuxjec`.
 
 **Status addendum ini:** penghapusan semua jalur email keluar aplikasi, migration staging, 69 automated tests, pgTAP, smoke test live Auth/tenant, dan deployment frontend staging telah diverifikasi. **READY untuk uji penerimaan terkontrol di staging.** Ini bukan sertifikasi seluruh aplikasi untuk produksi: `.env.test.local` tidak tersedia, browser tidak diuji dengan sesi owner/assistant terautentikasi, dan beberapa alur bisnis di luar perubahan ini tidak termasuk smoke test. Bagian ini menggantikan klaim historis tentang email recovery/undangan yang masih dipertahankan.
+
+## Addendum — Pipeline ML Smart Kasbon dan perbaikan kalkulator Zakat (14 November 2026)
+
+Addendum ini mencatat implementasi ML advisory dan perbaikan route Zakat setelah pemeriksaan staging sebelumnya. Status pada addendum ini yang paling baru dan menggantikan klaim historis bahwa pipeline ML sama sekali belum ada.
+
+### Perubahan source
+
+- `supabase/functions/_shared/smart-kasbon-model.js`: preprocessing snapshot point-in-time, label pembayaran sampai cutoff jatuh tempo WIB, split kronologis dengan eksklusi group pelanggan, logistic regression, metrik holdout/baseline, validasi artifact, dan inference.
+- `supabase/functions/smart-kasbon/index.ts`: aksi owner-only untuk evaluasi/pelatihan data dalam scope `store_id`, penyimpanan kandidat `shadow`, aktivasi manual setelah guard metrik, dan prediksi advisory pada penerbitan kasbon. Model tidak mengganti atau mengubah keputusan batas SQL.
+- `supabase/migrations/202611160001_smart_kasbon_ml_pipeline.sql`: limiter pelatihan per toko, RLS/grant service-role, indeks satu model aktif per toko, dan RPC aktivasi yang memeriksa kelayakan kandidat.
+- `js/app.js`: status/metric model, aksi owner untuk train/activate, penjelasan bahwa prediction advisory tidak mengendalikan approval, tampilan hasil prediksi saat kasbon disetujui; route kalkulator Zakat dipasang dengan mount dan tombol simpan menulis ke settings vault terenkripsi.
+- `sw.js`: cache version dinaikkan menjadi `warungpintar-v48`.
+- `supabase/tests/security_integrity.test.sql` dan `tests/smart-kasbon-ml.test.js`: privilege/RLS limiter serta tes teknis preprocessing, cutoff label, split group, cold start, artifact, dan inference.
+- `README.md`: dokumentasi pipeline, ambang evaluasi, keterbatasan model, dan kalkulator Zakat diperbarui.
+
+### Bukti model dan data staging
+
+- Hanya data ledger yang sudah ada pada toko yang diminta dapat masuk pipeline; tidak ada generator atau seed data model di runtime. Pelatihan dibatasi satu kali per toko per 24 jam dan maksimal 10.000 kasbon/50.000 pembayaran per proses.
+- Minimum kandidat: 100 sampel training, 40 sampel holdout, 25 sampel setiap kelas pada training, 10 setiap kelas pada evaluasi, dan 10 pelanggan evaluasi independen. Kandidat hanya eligible bila PR-AUC lebih tinggi dari baseline, Brier score lebih rendah, dan ECE ≤ 0,1. Aktivasi tetap manual oleh owner dan hanya advisory.
+- Query agregat Supabase staging setelah migrasi menunjukkan **0 kasbon, 0 pembayaran, 0 versi model**. Tidak ada model artifact, skor holdout, atau klaim akurasi bisnis yang dihasilkan. Fixture sintetis dalam unit test hanya menguji mekanisme, bukan bukti performa.
+- Verifikasi privilege SQL: RLS training limiter aktif; `service_role` dapat menjalankan RPC, sedangkan `anon`/`authenticated` tidak dapat membaca limiter atau memanggil fungsi training/activation. Filter tenant pada seluruh query ML memakai toko yang sudah diverifikasi keanggotaan user.
+
+### Validasi dan deployment backend
+
+| Pemeriksaan | Hasil |
+|---|---|
+| `node --test tests/smart-kasbon-ml.test.js` | **PASS — 5/5** |
+| `npm test` | **PASS — 74/74** |
+| `node --check js/app.js` dan helper ML | **PASS** |
+| `npx deno check supabase/functions/smart-kasbon/index.ts` | **PASS** |
+| `npm run build` | **PASS** |
+| Build staging dengan config yang divalidasi mengarah ke `unkmykhwddwhbtuioqrg` | **PASS — d12b2dd2599d** |
+| `npm audit --omit=dev` | **PASS — 0 vulnerabilities** |
+| `git diff --check` | **PASS** |
+| Project Supabase | CLI menunjukkan `warungpintar-staging`, ref `unkmykhwddwhbtuioqrg`; tidak ada command yang menargetkan production `skvskjrhhekwvkwuxjec`. |
+| Migration source | Delapan migration lokal; tujuh versi terdahulu ada pada remote sebelum perubahan. Migration `202611160001_smart_kasbon_ml_pipeline` diterapkan dan tercatat sebagai versi terbaru. |
+| Dry-run/repair CLI | **BLOCKED** oleh `SQLSTATE 28P01` (password PostgreSQL staging ditolak). SQL migration dijalankan melalui `supabase db query --remote=unkmykhwddwhbtuioqrg`; setelah `supabase migration repair` resmi gagal dengan error yang sama, versi dicatat melalui Management API dengan `statements` kosong. Skema/object dan history sudah diverifikasi read-only; pencatatan manual harus ditinjau/ganti dengan `migration repair` resmi bila akses DB yang sah tersedia. |
+| Edge Function | `smart-kasbon` aktif versi **4**, `verify_jwt=true`, ref staging. Probe tanpa kredensial menghasilkan HTTP 401. |
+| Isolasi dan data | Tidak ada data training pada staging. SQL privilege checks lulus; E2E owner/assistant lintas toko belum dijalankan pada sesi browser terautentikasi. |
+
+### Frontend, Zakat, dan hambatan verifikasi live
+
+- Commit `f14e69c` sudah dipush ke branch `staging`. Git remote mengonfirmasi ref tersebut.
+- Build staging lokal valid, tetapi sesudah push asset website masih mengembalikan HTTP 200 dengan source yang belum memuat marker UI ML/Zakat terbaru. Dashboard Render meminta login, `render.yaml` tidak ada, dan tidak ada Render API environment variable; koneksi service/branch serta Auto-Deploy tidak bisa dibaca atau dipicu manual dari akses saat ini. Karena itu frontend terbaru **belum terverifikasi live**.
+- Browser staging hanya menampilkan halaman login bertanda `STAGING`. `.env.test.local` tidak tersedia; tidak ada sesi owner/assistant, sehingga Zakat dan Smart Kasbon tidak dapat diuji melalui alur browser terautentikasi.
+- pgTAP tidak dijalankan pada tahap ini karena koneksi PostgreSQL ditolak dan extension belum dapat diverifikasi. Tes JS dan pemeriksaan privilege read-only bukan pengganti E2E/pgTAP.
+- Tidak ada email yang ditambahkan atau dikirim. Tidak ada operasi database destruktif, penghapusan data, atau akses ke project production.
+
+### Status kesiapan terbaru
+
+**NOT READY / BELUM LAYAK untuk pengguna nyata.** Backend pipeline ML dan migration staging aktif, namun staging belum memiliki satu pun kasbon untuk training, tidak ada model/performa yang tervalidasi, frontend commit terbaru belum terlayani, migration CLI repair tetap terhalang password DB, dan E2E owner/assistant serta pgTAP belum dibuktikan. Smart Kasbon tetap memakai aturan SQL untuk seluruh keputusan sampai tersedia data nyata yang memadai, evaluasi independen yang memenuhi ambang, dan aktivasi advisory yang disetujui owner.
