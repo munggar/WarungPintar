@@ -1382,3 +1382,46 @@ Bagian ini adalah pembaruan setelah perubahan registrasi dan deployment staging 
 **Penghapusan email confirmation registrasi: SELESAI.** Tidak diperlukan mailbox: pendaftaran live menghasilkan sesi dan login langsung, signup publik nonaktif, dan alur registrasi tidak mengirim email atau meminta OTP/tautan aktivasi. `email_confirm: true` hanya menandai akun secara administratif agar sesi password dapat dibuat; itu bukan pengiriman email atau tindakan yang diminta dari pengguna.
 
 **Kesiapan keseluruhan: NOT READY / BELUM LAYAK untuk pengguna nyata.** Penghambat yang tersisa adalah pgTAP/RLS penuh dan E2E browser terautentikasi untuk seluruh fitur inti. Catatan mailbox hanya berlaku untuk fitur terpisah yang tetap dipertahankan sesuai instruksi sebelumnya: pemulihan password melalui email dan undangan assistant. Keterbatasan mailbox tersebut bukan blocker untuk penghapusan email confirmation registrasi.
+
+## Addendum — Penghapusan Seluruh Email Aplikasi dan Kode Akses (14 November 2026)
+
+Addendum ini mencatat keputusan terbaru untuk menghapus seluruh jalur email keluar aplikasi, termasuk recovery password dan undangan assistant. Bagian historis yang menyebut kedua email tersebut dipertahankan tidak lagi menggambarkan implementasi saat ini.
+
+### Perubahan
+
+- Jalur recovery password berbasis email/OTP dihapus. `account-recovery` menerbitkan kode sekali pakai; `reset-password` memvalidasi dan mengonsumsi kode yang terikat ke akun. Hash SHA-256 kode disimpan di database; kode mentah tidak disimpan.
+- Undangan assistant melalui email dihapus. Owner membuat invitation code yang terikat toko, kedaluwarsa, dapat dicabut, dan hanya dapat dipakai sekali. Penerimaan invitation membuat membership role `assistant`; role dari payload client tidak dipercaya.
+- `js/app.js`, `js/supabase.js`, dan `js/cloud-sync.js` memakai alur kode dan tidak lagi mengirim email recovery/undangan atau memproses callback/OTP email.
+- `supabase/functions/_shared/reset-security.js` yang hanya mendukung alur lama dihapus. Helper keamanan kode recovery dan invitation ditambahkan; fungsi terkait Auth/assistant diperbarui.
+- Migration additive `202611150001_email_free_account_codes.sql` menambahkan penyimpanan hash, reservation/consume atomik, dan validasi undangan saat pembuatan akun. Migration diterapkan hanya ke project staging `unkmykhwddwhbtuioqrg`; tidak ada operasi destruktif.
+- Regression tests mencakup alur recovery, invitation, pencegahan role escalation, dan pemeriksaan bahwa jalur runtime tidak memanggil API email/OTP.
+- Email tetap menjadi identifier login; public signup tetap nonaktif. Kunci Pemulihan vault tetap terpisah dari kode pemulihan akun dan hanya dipakai untuk membuka data toko terenkripsi.
+
+### Bukti dan hasil terbaru
+
+| Pemeriksaan | Hasil |
+|---|---|
+| `npm test` | **PASS — 69/69** |
+| Build frontend Render staging | **PASS**; build ID `811005b3fa8b`, dengan project dan identitas service staging divalidasi. |
+| `npm audit --omit=dev` | **PASS — 0 vulnerabilities** pada pemeriksaan sebelumnya; dependency tidak berubah pada addendum ini. |
+| `git diff --check` | **PASS** sebelum pembaruan laporan ini. |
+| Migration kode recovery/invitation | Diterapkan hanya pada `unkmykhwddwhbtuioqrg`. |
+| pgTAP staging | **PASS** di dalam transaksi rollback; tidak ada extension maupun fixture tes yang tertinggal. |
+| Auth staging | Signup publik nonaktif (`disable_signup=true`) dan auto-confirm aktif (`mailer_autoconfirm=true`); tidak ada konfigurasi email confirmation yang diperlukan untuk registrasi owner melalui Edge Function. |
+| Registrasi owner live | **PASS**; respons menyediakan access/refresh session langsung dan identitas Auth menunjukkan email telah dikonfirmasi secara administratif. Tidak ada OTP atau tautan aktivasi yang diminta. |
+| Duplikasi email owner | **PASS**; alamat terpakai ditolak HTTP 400. |
+| Invitation assistant | **PASS**; sesi langsung terbentuk, role tetap `assistant` meski payload meminta `owner`, dan penggunaan ulang kode ditolak HTTP 403. |
+| Recovery akun | **PASS**; hash di database sama dengan SHA-256 kode yang diterbitkan, password berubah, login password langsung berhasil, dan penggunaan ulang kode ditolak HTTP 400. |
+| Isolasi toko | **PASS**; toko owner A dan B berbeda, dan assistant toko A tidak dapat membaca toko B. |
+| Pembersihan smoke test | **PASS**; akun staging kembali ke baseline 5 dan tidak ada invitation owner fixture tersisa. |
+| Browser frontend staging | Form owner hanya meminta kode undangan, tanpa aktivasi/resend email. Pada viewport 390 CSS px tidak ada horizontal overflow. Ini adalah pemeriksaan UI, bukan sesi browser owner/assistant terautentikasi. |
+| Email keluar aplikasi | Tes statis memastikan jalur runtime tidak memakai API pengiriman email atau OTP. Tidak ada mailbox yang dapat diakses; tidak ada email yang dikirim sebagai bagian dari smoke test. |
+
+### Batas deployment dan kesiapan
+
+- `supabase db push --dry-run` tetap gagal karena koneksi PostgreSQL menolak password lokal (`SQLSTATE 28P01`). Migration diuji dan diterapkan hanya pada staging melalui Supabase Management API; riwayat versi dicatat manual setelah `migration repair` juga terhambat oleh koneksi tersebut. Jangan menganggap dry-run CLI berhasil.
+- Dashboard Render mengarahkan ke login dan tidak tersedia token/API Render pada environment. Perbandingan hash aset menunjukkan `css/style.css` live sama dengan build lokal, tetapi `js/app.js` live belum sama dengan build `811005b3fa8b`. Karena itu pada snapshot ini deployment frontend terbaru **belum terverifikasi**; deployment setelah push branch `staging` masih harus dibuktikan dengan kecocokan aset live.
+- `.env.test.local` tidak ditemukan. Smoke test menggunakan akun sementara yang dibuat secara acak pada staging; kredensial tidak dicetak dan fixture dibersihkan.
+- Tidak ada perubahan pada project production `skvskjrhhekwvkwuxjec`.
+
+**Status addendum ini:** backend staging, migration, suite otomatis, dan smoke test Auth/tenant lulus. Jangan menyatakan seluruh pekerjaan selesai atau seluruh aplikasi layak untuk pengguna nyata sebelum frontend Render memuat aset terbaru dan perbedaan build/live diverifikasi kembali. Bagian ini menggantikan klaim historis tentang email recovery/undangan yang masih dipertahankan.

@@ -1,10 +1,11 @@
 begin;
 
-select plan(61);
+select no_plan();
 
 select has_table('public', 'owner_registration_invites', 'owner invite table exists');
 select has_table('public', 'password_reset_attempts', 'persistent reset limiter table exists');
 select has_table('public', 'owner_registration_attempts', 'persistent owner registration limiter table exists');
+select has_table('public', 'account_recovery_codes', 'account recovery code table exists');
 select ok(
   (select relrowsecurity from pg_class where oid = 'public.owner_registration_invites'::regclass),
   'owner invite table has RLS enabled'
@@ -17,12 +18,18 @@ select ok(
   (select relrowsecurity from pg_class where oid = 'public.owner_registration_attempts'::regclass),
   'owner registration limiter table has RLS enabled'
 );
+select ok(
+  (select relrowsecurity from pg_class where oid = 'public.account_recovery_codes'::regclass),
+  'account recovery codes have RLS enabled'
+);
 select ok(not has_table_privilege('anon', 'public.owner_registration_invites', 'SELECT'), 'anon cannot read owner invites');
 select ok(not has_table_privilege('authenticated', 'public.owner_registration_invites', 'SELECT'), 'authenticated cannot read owner invites');
 select ok(not has_table_privilege('anon', 'public.password_reset_attempts', 'SELECT'), 'anon cannot read reset attempts');
 select ok(not has_table_privilege('authenticated', 'public.password_reset_attempts', 'SELECT'), 'authenticated cannot read reset attempts');
 select ok(not has_table_privilege('anon', 'public.owner_registration_attempts', 'SELECT'), 'anon cannot read registration attempts');
 select ok(not has_table_privilege('authenticated', 'public.owner_registration_attempts', 'SELECT'), 'authenticated cannot read registration attempts');
+select ok(not has_table_privilege('anon', 'public.account_recovery_codes', 'SELECT'), 'anon cannot read account recovery codes');
+select ok(not has_table_privilege('authenticated', 'public.account_recovery_codes', 'SELECT'), 'authenticated cannot read account recovery codes');
 select ok(
   has_function_privilege('service_role', 'public.consume_owner_registration_attempt(text)', 'EXECUTE'),
   'service role can consume registration attempts'
@@ -30,16 +37,25 @@ select ok(
 select ok(not has_function_privilege('anon', 'public.consume_owner_registration_attempt(text)', 'EXECUTE'), 'anon cannot consume registration attempts');
 select ok(has_function_privilege('service_role', 'public.consume_password_reset_attempt(text)', 'EXECUTE'), 'service role can use reset limiter');
 select ok(not has_function_privilege('anon', 'public.consume_password_reset_attempt(text)', 'EXECUTE'), 'anon cannot use reset limiter');
-select ok(not has_function_privilege('authenticated', 'public.resolve_password_reset_target(text)', 'EXECUTE'), 'authenticated cannot resolve reset accounts');
-select is(
-  (select count(*)::integer from public.resolve_password_reset_target('missing-user@invalid.test')),
-  0,
-  'unknown reset email resolves to no account rows'
-);
+select ok(has_function_privilege('service_role', 'public.resolve_account_recovery_target(text)', 'EXECUTE'), 'service role can resolve recovery target');
+select ok(not has_function_privilege('authenticated', 'public.resolve_account_recovery_target(text)', 'EXECUTE'), 'authenticated cannot resolve recovery target');
+select ok(has_function_privilege('service_role', 'public.reserve_account_recovery_code(uuid,text)', 'EXECUTE'), 'service role can reserve recovery code');
+select ok(not has_function_privilege('anon', 'public.reserve_account_recovery_code(uuid,text)', 'EXECUTE'), 'anon cannot reserve recovery code');
+select ok(has_function_privilege('service_role', 'public.reserve_store_invite(text)', 'EXECUTE'), 'service role can reserve assistant invite');
+select ok(not has_function_privilege('authenticated', 'public.reserve_store_invite(text)', 'EXECUTE'), 'authenticated cannot reserve assistant invite');
+select ok(has_function_privilege('service_role', 'public.create_store_invite(uuid,uuid,text)', 'EXECUTE'), 'service role can issue store invite');
+select ok(not has_function_privilege('authenticated', 'public.create_store_invite(uuid,uuid,text)', 'EXECUTE'), 'authenticated cannot issue store invite');
 
 create temporary table test_security_context (
   invite_token text,
+  invite_token_b text,
   reservation_id uuid,
+  reservation_b uuid,
+  assistant_code_hash text,
+  assistant_reservation uuid,
+  account_recovery_hash text,
+  account_recovery_hash_b text,
+  account_recovery_reservation uuid,
   store_a uuid,
   store_b uuid,
   owner_a uuid,
@@ -58,12 +74,13 @@ create temporary table test_security_context (
 ) on commit drop;
 
 insert into test_security_context (
-  invite_token, owner_a, owner_b, assistant_a,
+  invite_token, invite_token_b, owner_a, owner_b, assistant_a,
   loan_id, loan_id_2, compensation_loan_id, compensation_payment_loan_id,
   customer_id, customer_id_2, payment_id, payment_id_2, payment_id_3, payment_id_4
 )
 values (
   public.create_owner_registration_invite('kasbon-owner-a@invalid.test'),
+  public.create_owner_registration_invite('kasbon-owner-b@invalid.test'),
   'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
   'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
   'cccccccc-cccc-4ccc-8ccc-cccccccccccc',
@@ -105,6 +122,9 @@ select ok(
 update test_security_context
 set reservation_id = public.reserve_owner_registration_invite(invite_token, 'kasbon-owner-a@invalid.test');
 select ok((select reservation_id is not null from test_security_context), 'released owner invite can be retried');
+update test_security_context
+set reservation_b = public.reserve_owner_registration_invite(invite_token_b, 'kasbon-owner-b@invalid.test');
+select ok((select reservation_b is not null from test_security_context), 'second owner invite can be reserved');
 
 select ok(public.consume_password_reset_attempt(repeat('a', 64)), 'first reset attempt is allowed');
 do $$
@@ -124,9 +144,13 @@ where email_hash = repeat('a', 64);
 select ok(public.consume_password_reset_attempt(repeat('a', 64)), 'reset attempts are allowed after the window expires');
 
 insert into auth.users (id, email, encrypted_password, raw_user_meta_data)
-values
-  ('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', 'kasbon-owner-a@invalid.test', '', '{"store_name":"Audit A"}'),
-  ('bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb', 'kasbon-owner-b@invalid.test', '', '{"store_name":"Audit B"}');
+select owner_a, 'kasbon-owner-a@invalid.test', '',
+  jsonb_build_object('store_name', 'Audit A', 'owner_invite_reservation_id', reservation_id::text)
+from test_security_context
+union all
+select owner_b, 'kasbon-owner-b@invalid.test', '',
+  jsonb_build_object('store_name', 'Audit B', 'owner_invite_reservation_id', reservation_b::text)
+from test_security_context;
 
 update test_security_context context
 set store_a = member.store_id
@@ -142,6 +166,17 @@ select ok(
   'owner registration completes and redeems the reserved invite'
 )
 from test_security_context context;
+select throws_ok(
+  format(
+    'insert into auth.users (id, email, encrypted_password) values (%L, %L, %L)',
+    'dddddddd-dddd-4ddd-8ddd-dddddddddddd',
+    'kasbon-uninvited@invalid.test',
+    ''
+  ),
+  'P0001',
+  'Pendaftaran harus menggunakan kode undangan yang valid.',
+  'new accounts without an owner or assistant invitation are rejected'
+);
 select is(
   public.reserve_owner_registration_invite(
     (select invite_token from test_security_context),
@@ -151,27 +186,92 @@ select is(
   'redeemed owner invite cannot be used again'
 );
 
-insert into public.store_invites (store_id, email, invited_by, expires_at)
-select store_a, 'kasbon-assistant-a@invalid.test', owner_a, now() + interval '1 hour'
+update test_security_context
+set assistant_code_hash = encode(
+      extensions.digest(convert_to(repeat('f', 64), 'UTF8'), 'sha256'),
+      'hex'
+    ),
+    account_recovery_hash = encode(
+      extensions.digest(convert_to(repeat('e', 64), 'UTF8'), 'sha256'),
+      'hex'
+    ),
+    account_recovery_hash_b = encode(
+      extensions.digest(convert_to(repeat('d', 64), 'UTF8'), 'sha256'),
+      'hex'
+    );
+select created.invite_id
+from test_security_context context,
+     public.create_store_invite(context.store_a, context.owner_a, context.assistant_code_hash) created;
+select throws_ok(
+  format(
+    'select * from public.create_store_invite(%L, %L, %L)',
+    (select store_a::text from test_security_context),
+    (select assistant_a::text from test_security_context),
+    repeat('a', 64)
+  ),
+  'P0001',
+  'Hanya pemilik toko yang dapat membuat kode undangan asisten.',
+  'assistant cannot issue invitation codes or elevate another account'
+);
+update test_security_context
+set assistant_reservation = public.reserve_store_invite(assistant_code_hash);
+select ok((select assistant_reservation is not null from test_security_context), 'store-bound assistant code can be reserved');
+insert into auth.users (id, email, encrypted_password, raw_user_meta_data)
+select assistant_a, 'kasbon-assistant-a@invalid.test', '',
+  jsonb_build_object('assistant_invite_reservation_id', assistant_reservation::text)
 from test_security_context;
-insert into auth.users (id, email, encrypted_password)
-values ('cccccccc-cccc-4ccc-8ccc-cccccccccccc', 'kasbon-assistant-a@invalid.test', '');
+select ok(
+  public.complete_store_invite(context.assistant_reservation, context.assistant_a),
+  'assistant code is consumed by the invited account'
+)
+from test_security_context context;
+select is(
+  public.reserve_store_invite((select assistant_code_hash from test_security_context)),
+  null::uuid,
+  'consumed assistant code cannot be reused'
+);
+select is(
+  public.resolve_account_recovery_target('missing-user@invalid.test'),
+  null::uuid,
+  'unknown recovery email resolves to no account'
+);
+select public.issue_account_recovery_code(owner_a, account_recovery_hash)
+from test_security_context;
+update test_security_context
+set account_recovery_reservation = public.reserve_account_recovery_code(owner_a, account_recovery_hash);
+select ok((select account_recovery_reservation is not null from test_security_context), 'owner account recovery code can be reserved');
+select ok(
+  public.complete_account_recovery_code(context.account_recovery_reservation, context.owner_a),
+  'account recovery code is consumed once'
+)
+from test_security_context context;
+select is(
+  public.reserve_account_recovery_code(
+    (select owner_a from test_security_context),
+    (select account_recovery_hash from test_security_context)
+  ),
+  null::uuid,
+  'consumed account recovery code cannot be reused'
+);
+select public.issue_account_recovery_code(owner_b, account_recovery_hash_b)
+from test_security_context;
+update public.account_recovery_codes
+set expires_at = now() - interval '1 second'
+where user_id = (select owner_b from test_security_context);
+select is(
+  public.reserve_account_recovery_code(
+    (select owner_b from test_security_context),
+    (select account_recovery_hash_b from test_security_context)
+  ),
+  null::uuid,
+  'expired account recovery code cannot be reserved'
+);
 
 insert into public.store_data (
   store_id, ciphertext, iv, recovery_salt, recovery_iv, recovery_wrapped_key, updated_by
 )
 select store_a, 'ciphertext', 'iv', 'AAAAAAAAAAAAAAAAAAAAAA==', 'AAAAAAAAAAAAAAAA', 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA', owner_a
 from test_security_context;
-select is(
-  (select count(*)::integer from public.resolve_password_reset_target('kasbon-owner-a@invalid.test')),
-  1,
-  'password reset lookup returns the invited owner and recovery envelope'
-);
-select is(
-  (select count(*)::integer from public.resolve_password_reset_target('kasbon-assistant-a@invalid.test')),
-  1,
-  'password reset lookup resolves an assistant only through its current store membership'
-);
 select ok((select store_a is not null and store_b is not null and store_a <> store_b from test_security_context), 'two owners receive distinct stores');
 select is(
   (select count(*)::integer from public.store_members member, test_security_context context

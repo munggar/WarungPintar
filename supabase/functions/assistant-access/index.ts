@@ -21,8 +21,8 @@ Deno.serve(async (request) => {
   }
 
   try {
-    const { action, user_id: targetId } = await request.json();
-    if (!['list', 'remove'].includes(action)) {
+    const { action, user_id: targetId, invite_id: inviteId } = await request.json();
+    if (!['list', 'remove', 'revoke-invite'].includes(action)) {
       return Response.json({ error: 'Aksi anggota tidak valid.' }, { status: 400, headers: corsHeaders });
     }
     const callerClient = createClient(url, anonKey, { global: { headers: { Authorization: authorization } } });
@@ -35,6 +35,18 @@ Deno.serve(async (request) => {
     if (ownerError) throw ownerError;
     if (!owners?.length) return Response.json({ error: 'Hanya pemilik yang dapat mengelola asisten.' }, { status: 403, headers: corsHeaders });
     const storeId = owners[0].store_id;
+
+    if (action === 'revoke-invite') {
+      if (typeof inviteId !== 'string' || !/^[0-9a-f-]{36}$/i.test(inviteId)) {
+        return Response.json({ error: 'Kode undangan tidak valid.' }, { status: 400, headers: corsHeaders });
+      }
+      const { data: invite, error: inviteError } = await admin.from('store_invites').delete()
+        .eq('id', inviteId).eq('store_id', storeId).not('code_hash', 'is', null)
+        .is('accepted_at', null).select('id').maybeSingle();
+      if (inviteError) throw inviteError;
+      if (!invite) return Response.json({ error: 'Undangan tidak ditemukan atau sudah digunakan.' }, { status: 404, headers: corsHeaders });
+      return Response.json({ revoked: true }, { headers: corsHeaders });
+    }
 
     if (action === 'remove') {
       if (!targetId || targetId === user.id) return Response.json({ error: 'Asisten tidak valid.' }, { status: 400, headers: corsHeaders });
@@ -59,7 +71,11 @@ Deno.serve(async (request) => {
       if (error) throw error;
       return { user_id: assistant.user_id, email: data.user.email, joined_at: assistant.joined_at };
     }));
-    return Response.json({ assistants: records }, { headers: corsHeaders });
+    const { data: pendingInvites, error: invitesError } = await admin.from('store_invites')
+      .select('id, expires_at').eq('store_id', storeId).not('code_hash', 'is', null)
+      .is('accepted_at', null).gt('expires_at', new Date().toISOString());
+    if (invitesError) throw invitesError;
+    return Response.json({ assistants: records, pending_invites: pendingInvites || [] }, { headers: corsHeaders });
   } catch (error) {
     console.error('Pengelolaan asisten gagal:', error);
     return Response.json({ error: error instanceof Error ? error.message : 'Pengelolaan asisten gagal.' }, { status: 500, headers: corsHeaders });

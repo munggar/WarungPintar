@@ -35,7 +35,7 @@ const S = {
   processingDebtIds: new Set(),
   smartKasbon: null, smartKasbonCustomerNames: {}, smartKasbonLoading: false, smartKasbonMutationInProgress: false, smartKasbonError: '',
   qrisPreview: '', qrisFile: null, qrisStorageError: '',
-  receipt: null,
+  receipt: null, oneTimeCode: null,
   recentSalesLimit: 20,
   rep: { preset: 'bulan', from: L.ymd(new Date()), to: L.ymd(new Date()) }, showLunas: false,
 };
@@ -224,6 +224,20 @@ async function authorizeSmartKasbonLoan(debt, expected) {
       amount: debt.jumlah,
       due_date: L.ymd(debt.jatuhTempo),
     },
+    'copy-one-time-code': async () => {
+      if (!S.oneTimeCode) throw new Error('Kode sekali pakai tidak tersedia.');
+      await navigator.clipboard.writeText(S.oneTimeCode.code);
+      toast('Kode sekali pakai disalin ke papan klip.');
+    },
+    'download-one-time-code': () => {
+      if (!S.oneTimeCode) throw new Error('Kode sekali pakai tidak tersedia.');
+      downloadFile(S.oneTimeCode.filename, 'text/plain;charset=utf-8', `${S.oneTimeCode.title}\n\n${S.oneTimeCode.code}\n\nSimpan secara aman. Kode hanya ditampilkan sekali.\n`);
+    },
+    'confirm-one-time-code': () => {
+      S.oneTimeCodeDone?.();
+      S.oneTimeCode = null;
+      $('#dlg').close();
+    },
   };
   const decision = await smartKasbonMutationWithRetry(
     'issue', payload, 'void_loan', { loan_id: loanId }, expected,
@@ -295,30 +309,32 @@ async function setCfgMany(values) {
 function renderAuth(message = S.authMessage) {
   S.authMessage = message;
   $('#toko').textContent = 'WarungPintar';
-  $('#judul').textContent = S.authFlow?.invite ? 'Aktivasi akun asisten' : S.authFlow?.passwordRecovery ? 'Atur ulang kata sandi' : S.authMode === 'register' ? 'Pendaftaran pemilik' : 'Masuk';
+  $('#judul').textContent = S.authMode === 'register' ? 'Pendaftaran pemilik' : S.authMode === 'assistant' ? 'Pendaftaran asisten' : 'Masuk';
   $('#role').textContent = '';
   $('#sync').textContent = '';
   $('#sync').className = '';
   $('#nav').innerHTML = '';
-  const invited = Boolean(S.authFlow?.invite);
-  const reset = Boolean(S.authFlow?.passwordRecovery);
-  const formTitle = invited ? 'Buat kata sandi asisten' : reset ? 'Kata sandi baru' : S.authMode === 'register' ? 'Buat akun pemilik' : 'Masuk ke toko';
+  const assistant = S.authMode === 'assistant';
+  const registering = S.authMode === 'register' || assistant;
+  const formTitle = assistant ? 'Bergabung sebagai asisten' : registering ? 'Buat akun pemilik' : 'Masuk ke toko';
   const recovery = `<label class="field"><span>Kunci pemulihan (opsional)</span><input name="recovery" autocomplete="off" placeholder="Diperlukan setelah kata sandi diubah atau saat asisten membuka data"><small>Pemilik membagikan kunci pemulihan kepada asisten melalui saluran terpisah yang aman.</small></label>`;
   $('#view').innerHTML = `<section class="card auth-card">
     <h2>${formTitle}</h2>
     <p class="muted">${esc(message || 'Data bisnis dienkripsi sebelum disinkronkan ke server.')}</p>
     <form id="auth-form">
-      ${!invited && !reset ? `<label class="field"><span>Email</span><input name="email" type="email" value="${esc(S.authEmail)}" required autocomplete="email"></label>` : `<label class="field"><span>Email akun</span><input name="email" type="email" value="${esc(S.authFlow?.email || '')}" readonly></label>`}
-      ${S.authMode === 'register' && !invited && !reset ? '<label class="field"><span>Nama toko</span><input name="storeName" required maxlength="120" autocomplete="organization"></label>' : ''}
-      ${S.authMode === 'register' && !invited && !reset ? '<label class="field"><span>Kode undangan pendaftaran</span><input name="inviteCode" required minlength="64" maxlength="64" pattern="[0-9A-Fa-f]{64}" autocomplete="off" spellcheck="false"><small>Minta kode satu kali dari administrator WarungPintar.</small></label>' : ''}
-      <label class="field"><span>${invited || reset ? 'Kata sandi baru' : 'Kata sandi'}</span><input name="password" type="password" required minlength="${S.authMode === 'register' || invited || reset ? '8' : '6'}" autocomplete="${invited || reset ? 'new-password' : 'current-password'}"><small>${S.authMode === 'register' || invited || reset ? 'Gunakan kata sandi baru minimal 8 karakter.' : 'Masukkan kata sandi akun Anda.'}</small></label>
-      ${(S.authMode === 'register' || invited || reset) ? '<label class="field"><span>Ulangi kata sandi</span><input name="confirmPassword" type="password" required minlength="8" autocomplete="new-password"></label>' : ''}
+      <label class="field"><span>Email</span><input name="email" type="email" value="${esc(S.authEmail)}" required autocomplete="email"></label>
+      ${S.authMode === 'register' ? '<label class="field"><span>Nama toko</span><input name="storeName" required maxlength="120" autocomplete="organization"></label>' : ''}
+      ${registering ? `<label class="field"><span>${assistant ? 'Kode undangan asisten' : 'Kode undangan pendaftaran'}</span><input name="inviteCode" required minlength="64" maxlength="64" pattern="[0-9A-Fa-f]{64}" autocomplete="off" spellcheck="false"><small>${assistant ? 'Masukkan kode yang diberikan pemilik toko. Kode hanya dapat dipakai sekali.' : 'Minta kode satu kali dari administrator WarungPintar.'}</small></label>` : ''}
+      <label class="field"><span>Kata sandi</span><input name="password" type="password" required minlength="${registering ? '8' : '6'}" autocomplete="${registering ? 'new-password' : 'current-password'}"><small>${registering ? 'Gunakan kata sandi minimal 8 karakter.' : 'Masukkan kata sandi akun Anda.'}</small></label>
+      ${registering ? '<label class="field"><span>Ulangi kata sandi</span><input name="confirmPassword" type="password" required minlength="8" autocomplete="new-password"></label>' : ''}
       ${recovery}
-      <button class="btn primary big" type="submit">${invited || reset ? 'Simpan kata sandi dan buka data' : S.authMode === 'register' ? 'Daftar' : 'Masuk'}</button>
-      ${cloud.hasOfflineAccount() && !invited && !reset && S.authMode === 'login' ? '<button class="btn big" type="button" data-act="offline-unlock">Buka data secara offline</button>' : ''}
+      <button class="btn primary big" type="submit">${assistant ? 'Buat akun asisten' : S.authMode === 'register' ? 'Daftar' : 'Masuk'}</button>
+      ${cloud.hasOfflineAccount() && S.authMode === 'login' ? '<button class="btn big" type="button" data-act="offline-unlock">Buka data secara offline</button>' : ''}
     </form>
-    ${!invited && !reset ? `<div class="row wrap auth-actions">${S.authMode === 'register' ? '<button class="btn ghost" data-act="auth-mode" data-mode="login">Sudah memiliki akun? Masuk</button>' : '<button class="btn ghost" data-act="auth-mode" data-mode="register">Daftarkan akun pemilik</button><button class="btn ghost" data-act="forgot">Lupa kata sandi?</button>'}</div>` : ''}
-    <p class="muted small auth-security">Sesi dan kunci pembuka data disimpan di perangkat ini agar Anda tidak perlu masuk kembali setiap kali membuka aplikasi. Hindari perangkat bersama. Tombol Keluar menghapus sesi tersimpan. Kunci pemulihan tidak disimpan di server.</p>
+    <div class="row wrap auth-actions">${S.authMode === 'login'
+      ? '<button class="btn ghost" data-act="auth-mode" data-mode="register">Daftarkan akun pemilik</button><button class="btn ghost" data-act="auth-mode" data-mode="assistant">Gunakan kode undangan asisten</button><button class="btn ghost" data-act="forgot">Pulihkan dengan kode akun</button>'
+      : '<button class="btn ghost" data-act="auth-mode" data-mode="login">Sudah memiliki akun? Masuk</button>'}</div>
+    <p class="muted small auth-security">Sesi dan kunci pembuka data disimpan di perangkat ini agar Anda tidak perlu masuk kembali setiap kali membuka aplikasi. Hindari perangkat bersama. Tombol Keluar menghapus sesi tersimpan. Kode pemulihan akun dan kunci pemulihan data adalah dua hal berbeda; simpan keduanya secara aman.</p>
   </section>`;
 }
 
@@ -330,6 +346,29 @@ async function showRecoveryCode(code) {
     dialog.addEventListener('close', () => { if (!done) resolve(false); }, { once: true });
     S.recoveryDialogDone = () => { done = true; resolve(true); };
     S.recoveryCode = code;
+  });
+}
+
+async function showOneTimeCode({ title, description, code, expiresAt, filename }) {
+  return new Promise((resolve) => {
+    let done = false;
+    const expires = expiresAt ? `<p class="muted small">Berlaku sampai ${esc(fmtDate(expiresAt))}. Kode hanya ditampilkan sekali.</p>` : '';
+    const dialog = openDialog(`<div class="dlg-body"><h2>${esc(title)}</h2><p>${esc(description)}</p><p class="recovery-code">${esc(code)}</p>${expires}<div class="row wrap"><button class="btn" data-act="copy-one-time-code">Salin kode</button><button class="btn" data-act="download-one-time-code">Unduh kode</button></div><button class="btn primary big" data-act="confirm-one-time-code">Saya sudah menyimpannya</button></div>`);
+    dialog.oncancel = (event) => event.preventDefault();
+    dialog.addEventListener('close', () => { if (!done) resolve(false); }, { once: true });
+    S.oneTimeCode = { code, filename, title };
+    S.oneTimeCodeDone = () => { done = true; resolve(true); };
+  });
+}
+
+async function issueInitialAccountRecoveryCode() {
+  const result = await supabase.issueAccountRecoveryCode();
+  await showOneTimeCode({
+    title: 'Simpan Account Recovery Code',
+    description: 'Gunakan kode ini hanya untuk mengatur ulang kata sandi akun. Kode ditampilkan sekali, tersimpan sebagai hash di server, dan tidak dapat digunakan untuk membuka data toko.',
+    code: result.recovery_code,
+    expiresAt: result.expires_at,
+    filename: 'warungpintar-account-recovery-code.txt',
   });
 }
 
@@ -417,19 +456,15 @@ async function submitAuth(form) {
   S.authEmail = email;
   const password = String(values.password || '');
   const recovery = String(values.recovery || '').trim();
-  if ((S.authMode === 'register' || S.authFlow?.invite || S.authFlow?.passwordRecovery) && password.length < 8) {
+  const registering = S.authMode === 'register' || S.authMode === 'assistant';
+  if (registering && password.length < 8) {
     return renderAuth('Kata sandi baru harus terdiri dari minimal 8 karakter.');
   }
   if (S.authMode === 'login' && password.length < 6) return renderAuth('Kata sandi harus terdiri dari minimal 6 karakter.');
-  if ((S.authMode === 'register' || S.authFlow?.invite || S.authFlow?.passwordRecovery) && password !== values.confirmPassword) {
+  if (registering && password !== values.confirmPassword) {
     return renderAuth('Kata sandi yang dimasukkan belum sama.');
   }
   try {
-    if (S.authFlow?.invite || S.authFlow?.passwordRecovery) {
-      await supabase.updatePassword(password);
-      S.authFlow = null;
-      return await completeLogin(password, recovery);
-    }
     if (S.authMode === 'register') {
       const result = await supabase.register(
         email,
@@ -441,14 +476,39 @@ async function submitAuth(form) {
         S.authMode = 'login';
         return renderAuth('Pendaftaran belum memberikan sesi aktif. Coba masuk dengan email dan kata sandi; jika akun belum tersedia, ulangi pendaftaran.');
       }
+      let recoveryCodeUnavailable = false;
+      try {
+        await issueInitialAccountRecoveryCode();
+      } catch (error) {
+        console.error('Account Recovery Code awal tidak dapat diterbitkan:', error);
+        recoveryCodeUnavailable = true;
+      }
       await completeLogin(password, recovery, { startEmpty: true });
+      if (recoveryCodeUnavailable) toast('Akun berhasil dibuat, tetapi Account Recovery Code belum terbit. Buat kode dari Pengaturan sebelum keluar.', 'err');
+      return;
+    }
+    if (S.authMode === 'assistant') {
+      const result = await supabase.acceptAssistant(email, password, String(values.inviteCode || '').trim());
+      if (!result?.access_token || !result?.refresh_token) {
+        S.authMode = 'login';
+        return renderAuth('Pendaftaran asisten belum memberikan sesi aktif. Silakan masuk dengan email dan kata sandi.');
+      }
+      let recoveryCodeUnavailable = false;
+      try {
+        await issueInitialAccountRecoveryCode();
+      } catch (error) {
+        console.error('Account Recovery Code awal tidak dapat diterbitkan:', error);
+        recoveryCodeUnavailable = true;
+      }
+      await completeLogin(password, recovery);
+      if (recoveryCodeUnavailable) toast('Akun berhasil dibuat, tetapi Account Recovery Code belum terbit. Buat kode dari Pengaturan sebelum keluar.', 'err');
       return;
     }
     await supabase.login(email, password);
     await completeLogin(password, recovery);
   } catch (error) {
     console.error(error);
-    if (S.authMode === 'register'
+    if ((S.authMode === 'register' || S.authMode === 'assistant')
       && error instanceof supabase.SupabaseRequestError
       && ['registration_session_unavailable', 'registration_outcome_unknown'].includes(error.code)) {
       S.authMode = 'login';
@@ -461,20 +521,35 @@ async function submitAuth(form) {
 
 async function beginPasswordReset() {
   const value = await formModal({
-    title: 'Atur ulang kata sandi',
-    note: 'Tautan pemulihan akan dikirim ke email akun. Kunci pemulihan hanya digunakan untuk membuka data toko terenkripsi, bukan untuk mengubah kata sandi akun.',
+    title: 'Pulihkan akun dengan kode',
+    note: 'Masukkan Account Recovery Code yang disimpan sebelumnya. Kode ini mengubah kata sandi akun; Kunci Pemulihan Data tetap diperlukan terpisah untuk membuka data toko terenkripsi.',
     fields: [
       { name: 'email', label: 'Email akun', type: 'email', required: true },
+      { name: 'recoveryCode', label: 'Account Recovery Code', required: true },
+      { name: 'password', label: 'Kata sandi baru', type: 'password', required: true },
+      { name: 'confirmPassword', label: 'Ulangi kata sandi baru', type: 'password', required: true },
+      { name: 'vaultRecoveryKey', label: 'Kunci Pemulihan Data (opsional)', hint: 'Hanya untuk membuka data toko terenkripsi; bukan kode pengubah kata sandi.' },
     ],
-    submit: 'Kirim tautan pemulihan',
+    submit: 'Atur kata sandi baru',
+    validate: (values) => values.recoveryCode.trim().length !== 64
+      ? 'Account Recovery Code harus berisi 64 karakter.'
+      : values.password.length < 8 || values.password.length > 128
+        ? 'Kata sandi harus terdiri dari 8 sampai 128 karakter.'
+        : values.password !== values.confirmPassword
+          ? 'Kata sandi yang dimasukkan belum sama.'
+          : null,
   });
   if (!value) return;
   const email = value.email.trim().toLowerCase();
-  await supabase.resetPassword(email);
+  await supabase.resetPassword(email, value.recoveryCode.trim(), value.password);
   S.authMode = 'login';
   S.authEmail = email;
-  renderAuth('Jika email terkait akun tersedia, tautan pemulihan telah dikirim. Periksa kotak masuk dan folder spam. Setelah membuka tautan, atur kata sandi baru; kunci pemulihan tetap diperlukan untuk membuka data toko terenkripsi.');
-  toast('Jika email terkait akun tersedia, tautan pemulihan telah dikirim.');
+  try {
+    await supabase.login(email, value.password);
+    await completeLogin(value.password, value.vaultRecoveryKey);
+  } catch (error) {
+    renderAuth('Kata sandi akun berhasil diubah. Masuk kembali dengan kata sandi baru dan Kunci Pemulihan Data untuk membuka data toko: ' + error.message);
+  }
 }
 
 function toast(msg, type = 'ok') {
@@ -523,7 +598,8 @@ function fieldHtml(f) {
   } else {
     const num = f.type === 'number';
     const currency = f.type === 'currency';
-    ctl = `<input ${common} type="${num ? 'number' : 'text'}"${num || currency ? ` inputmode="numeric"${num ? ` step="1"${f.min != null ? ` min="${f.min}"` : ''}` : ' data-currency'}` : ''} value="${esc(currency ? formatRupiahInput(f.value) : f.value ?? '')}"${f.placeholder ? ` placeholder="${esc(f.placeholder)}"` : ''} autocomplete="off">`;
+    const type = ['email', 'password'].includes(f.type) ? f.type : num ? 'number' : 'text';
+    ctl = `<input ${common} type="${type}"${num || currency ? ` inputmode="numeric"${num ? ` step="1"${f.min != null ? ` min="${f.min}"` : ''}` : ' data-currency'}` : ''} value="${esc(currency ? formatRupiahInput(f.value) : f.value ?? '')}"${f.placeholder ? ` placeholder="${esc(f.placeholder)}"` : ''} autocomplete="${type === 'password' ? 'new-password' : 'off'}">`;
   }
   return `<label class="field"><span>${esc(f.label)}</span>${ctl}${f.hint ? `<small>${esc(f.hint)}</small>` : ''}</label>`;
 }
@@ -1633,6 +1709,7 @@ function vPengaturan() {
       <label class="field"><span>Nama pemilik</span><input id="s-pemilik" value="${esc(S.cfg.pemilik || '')}"></label>
       <label class="field"><span>Perkiraan waktu pengiriman barang (hari)</span><input id="s-lead" type="number" min="1" max="14" value="${esc(S.cfg.leadDays || 2)}"><small>Digunakan untuk memperkirakan kebutuhan pengisian stok.</small></label>
       <button class="btn primary" data-act="saveprofile">Simpan profil</button>` : '<p class="muted">Pemilik mengelola profil toko, laporan dan akses anggota.</p>'}</section>
+  <section class="card"><h2>Account Recovery Code</h2><p class="muted small">Buat kode sekali pakai untuk mengatur ulang kata sandi akun tanpa email. Kode berlaku satu tahun dan kode sebelumnya langsung tidak berlaku. Kode ini berbeda dari Kunci Pemulihan Data toko.</p><button class="btn" data-act="create-account-recovery">Buat kode pemulihan akun</button></section>
   <section class="card"><h2>Rekening transfer</h2><p class="muted small">Informasi rekening ini ditampilkan kepada kasir dan pelanggan saat metode transfer dipilih. Pembayaran tetap perlu diperiksa secara manual.</p>${transferAccountDetails()}</section>
   ${OWNER() ? `<section class="card"><h2>QRIS toko</h2><p class="muted small">Unggah kode QRIS statis milik toko. Berkas utama disimpan secara privat di Supabase Storage, sedangkan salinan offline disimpan dalam penyimpanan toko terenkripsi. Pembayaran tidak diverifikasi secara otomatis.</p>
     ${S.qrisStorageError ? `<p class="err">Penyimpanan QRIS belum tersedia: ${esc(S.qrisStorageError)}. Pastikan migrasi penyimpanan QRIS telah dijalankan dan koneksi Supabase tersedia.</p>` : ''}
@@ -1640,8 +1717,8 @@ function vPengaturan() {
     ${S.cfg.qrisImage ? `<img class="qris-preview" src="${esc(S.cfg.qrisImage)}" alt="Pratinjau QRIS toko"><div class="row wrap"><label class="btn">Ganti gambar<input id="qris-file" type="file" accept="image/png,image/jpeg,.png,.jpg,.jpeg" hidden></label><button class="btn danger" data-act="delete-qris">Hapus QRIS</button></div>` : `<label class="btn">Pilih gambar QRIS<input id="qris-file" type="file" accept="image/png,image/jpeg,.png,.jpg,.jpeg" hidden></label>`}
       ${S.qrisPreview ? `<div class="qris-upload-preview"><p class="muted small">Pratinjau gambar yang belum disimpan:</p><img class="qris-preview" src="${esc(S.qrisPreview)}" alt="Pratinjau QRIS baru"><div class="row wrap"><button class="btn primary" data-act="save-qris">Simpan QRIS</button><button class="btn ghost" data-act="cancel-qris-preview">Batal</button></div></div>` : ''}
     <p class="muted small">Format PNG atau JPEG, maksimal 1 MB. Pastikan gambar yang diunggah adalah QRIS toko dan dapat dipindai.</p></section>
-    <section class="card"><h2>Undang asisten</h2><p class="muted small">Kirim undangan melalui email. Setelah asisten membuat kata sandi, bagikan kunci pemulihan melalui saluran aman yang terpisah agar asisten dapat membuka data toko terenkripsi.</p>
-    <form id="invite-form" class="row wrap"><label class="field"><span>Email asisten</span><input name="email" type="email" required autocomplete="email"></label><button class="btn primary" type="submit">Kirim undangan</button></form><button class="btn" data-act="manage-assistants">Kelola asisten</button></section>
+    <section class="card"><h2>Undang asisten</h2><p class="muted small">Buat kode undangan yang hanya dapat digunakan sekali dan berlaku tujuh hari. Berikan kode secara langsung melalui saluran aman; setelah asisten membuat akun, bagikan Kunci Pemulihan Data secara terpisah.</p>
+    <form id="invite-form" class="row wrap"><button class="btn primary" type="submit">Buat kode undangan</button></form><button class="btn" data-act="manage-assistants">Kelola asisten</button></section>
     <section class="card"><h2>Kunci pemulihan</h2><p class="muted small">Buat kunci pemulihan baru jika kunci sebelumnya hilang. Kunci lama tidak berlaku setelah diganti. Simpan kunci baru sebelum membagikannya kepada asisten.</p><button class="btn" data-act="rotate-recovery">Buat kunci pemulihan baru</button></section>` : ''}
   <section class="card"><h2>Sinkronisasi</h2><p class="muted small">Perubahan dienkripsi sebelum dikirim. Saat offline, data tetap tersimpan dalam keadaan terenkripsi di perangkat dan akan disinkronkan saat koneksi tersedia.</p><button class="btn" data-act="sync">Sinkronkan sekarang</button></section>
   ${OWNER() ? `<section class="card"><h2>Cadangan terenkripsi</h2><p class="muted small">Berkas cadangan tidak memuat data dalam bentuk terbuka. Gunakan kata sandi akun untuk mengenkripsi dan memulihkan cadangan.</p>
@@ -1820,7 +1897,7 @@ const A = {
     await setCfg('leadDays', Math.min(14, Math.max(1, Number($('#s-lead').value) || 2)));
     toast('Profil disimpan.'); render();
   },
-  'auth-mode': (d) => { S.authMode = d.mode; S.authMessage = ''; renderAuth(); },
+  'auth-mode': (d) => { S.authMode = d.mode; S.authFlow = null; S.authMessage = ''; renderAuth(); },
   'offline-unlock': async () => {
     const password = $('#auth-form').elements.password.value;
     const recovery = $('#auth-form').elements.recovery.value.trim();
@@ -1846,13 +1923,15 @@ const A = {
     } else if (result.offline) toast('Mode luring. Perubahan tersimpan terenkripsi di perangkat dan akan disinkronkan saat koneksi tersedia.', 'err');
     else toast('Data berhasil disinkronkan.');
   },
-  invite: async (email) => { await cloud.inviteAssistant(email); toast('Undangan asisten dikirim ke ' + email + '.'); },
   'manage-assistants': async () => {
-    const assistants = await cloud.listAssistants();
-    const list = assistants.length
-      ? `<ul class="rows">${assistants.map((assistant) => `<li><span>${esc(assistant.email)}<small>Bergabung ${fmtDate(assistant.joined_at)}</small></span><button class="btn small danger" data-act="remove-assistant" data-id="${esc(assistant.user_id)}" data-email="${esc(assistant.email)}">Cabut akses</button></li>`).join('')}</ul>`
+    const result = await cloud.listAssistants();
+    const list = result.assistants.length
+      ? `<ul class="rows">${result.assistants.map((assistant) => `<li><span>${esc(assistant.email)}<small>Bergabung ${fmtDate(assistant.joined_at)}</small></span><button class="btn small danger" data-act="remove-assistant" data-id="${esc(assistant.user_id)}" data-email="${esc(assistant.email)}">Cabut akses</button></li>`).join('')}</ul>`
       : '<p class="muted">Belum ada asisten yang bergabung.</p>';
-    openDialog(`<div class="dlg-body"><h2>Asisten toko</h2>${list}<div class="row end"><button class="btn ghost" data-close>Tutup</button></div></div>`);
+    const invites = result.pendingInvites.length
+      ? `<h3>Kode undangan aktif</h3><ul class="rows">${result.pendingInvites.map((invite) => `<li><span>Belum digunakan<small>Berlaku sampai ${fmtDate(invite.expires_at)}</small></span><button class="btn small danger" data-act="revoke-assistant-invite" data-id="${esc(invite.id)}">Cabut kode</button></li>`).join('')}</ul>`
+      : '<p class="muted">Tidak ada kode undangan aktif.</p>';
+    openDialog(`<div class="dlg-body"><h2>Asisten toko</h2>${list}${invites}<div class="row end"><button class="btn ghost" data-close>Tutup</button></div></div>`);
   },
   'remove-assistant': async (data) => {
     $('#dlg').close();
@@ -1861,6 +1940,15 @@ const A = {
     $('#dlg').close();
     toast('Akses asisten dicabut.');
     await A['manage-assistants']();
+  },
+  'revoke-assistant-invite': async (data) => {
+    await cloud.revokeAssistantInvite(data.id);
+    toast('Kode undangan dicabut.');
+    $('#dlg').close();
+    await A['manage-assistants']();
+  },
+  'create-account-recovery': async () => {
+    await issueInitialAccountRecoveryCode();
   },
   'rotate-recovery': async () => {
     const code = await cloud.rotateRecoveryCode();
@@ -1970,16 +2058,21 @@ document.addEventListener('click', (e) => {
 document.addEventListener('submit', (e) => {
   if (e.target.id === 'auth-form') {
     e.preventDefault();
-    const message = S.authMode === 'register' ? 'Sedang membuat akun...'
-      : S.authFlow?.invite || S.authFlow?.passwordRecovery ? 'Sedang memperbarui kata sandi...'
-        : 'Sedang masuk dan membuka data...';
+    const message = S.authMode === 'login' ? 'Sedang masuk dan membuka data...' : 'Sedang membuat akun...';
     withLoading(() => submitAuth(e.target), message)
       .catch((err) => { console.error(err); renderAuth(err.message); });
   } else if (e.target.id === 'invite-form') {
     e.preventDefault();
-    const email = new FormData(e.target).get('email').trim().toLowerCase();
-    withLoading(() => cloud.inviteAssistant(email), 'Sedang mengirim undangan...')
-      .then(() => toast('Undangan asisten dikirim ke ' + email + '.'))
+    withLoading(async () => {
+      const result = await cloud.inviteAssistant();
+      await showOneTimeCode({
+        title: 'Simpan kode undangan asisten',
+        description: 'Berikan kode kepada orang yang akan bergabung. Kode terikat ke toko ini, berlaku tujuh hari, dan hanya dapat digunakan sekali.',
+        code: result.invitation_code,
+        expiresAt: result.expires_at,
+        filename: 'warungpintar-kode-undangan-asisten.txt',
+      });
+    }, 'Sedang membuat kode undangan...')
       .catch((err) => { console.error(err); toast('Gagal mengundang asisten: ' + err.message, 'err'); });
   }
 });
@@ -2077,10 +2170,7 @@ addEventListener('online', netStatus); addEventListener('offline', netStatus);
   try {
     if (navigator.storage?.persist) await navigator.storage.persist();
     const authState = await supabase.restoreSession();
-    if (authState?.invite || authState?.passwordRecovery) {
-      S.authFlow = { invite: authState.invite, passwordRecovery: authState.passwordRecovery, email: authState.user.email };
-      renderAuth(authState.invite ? 'Anda diundang untuk bergabung ke toko. Buat kata sandi dan masukkan kunci pemulihan yang diberikan oleh pemilik.' : 'Buat kata sandi baru. Kunci pemulihan diperlukan untuk membuka data terenkripsi.');
-    } else if (authState?.user) {
+    if (authState?.user) {
       S.authEmail = authState.user.email || '';
       try {
         const account = await cloud.unlockRememberedDevice(authState.user.id);

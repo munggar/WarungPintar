@@ -97,7 +97,7 @@ function envelopePayload(storeId, userId, envelope) {
 
 async function getMembership(userId) {
   const memberships = await supabase.select('store_members', `select=store_id,role&user_id=eq.${encodeURIComponent(userId)}`);
-  if (!memberships.length) throw new Error('Akun belum terhubung ke toko. Hubungi pemilik atau cek undangan email.');
+  if (!memberships.length) throw new Error('Akun belum terhubung ke toko. Hubungi pemilik atau periksa kode undangan.');
   const member = memberships[0];
   const stores = await supabase.select('stores', `select=id,name&id=eq.${encodeURIComponent(member.store_id)}`);
   if (!stores.length) throw new Error('Data toko tidak ditemukan atau akses akun belum aktif.');
@@ -443,20 +443,25 @@ export async function changeStoreName(name) {
   context.storeName = name;
 }
 
-export async function inviteAssistant(email) {
+export async function inviteAssistant() {
   if (!context || context.role !== 'owner') throw new Error('Hanya pemilik yang dapat mengundang asisten.');
-  return supabase.inviteAssistant(email);
+  return supabase.inviteAssistant();
 }
 
 export async function listAssistants() {
   if (!context || context.role !== 'owner') throw new Error('Hanya pemilik yang dapat melihat anggota toko.');
   const result = await supabase.assistantAccess('list');
-  return result.assistants || [];
+  return { assistants: result.assistants || [], pendingInvites: result.pending_invites || [] };
 }
 
 export async function removeAssistant(userId) {
   if (!context || context.role !== 'owner') throw new Error('Hanya pemilik yang dapat menghapus akses asisten.');
   return supabase.assistantAccess('remove', userId);
+}
+
+export async function revokeAssistantInvite(inviteId) {
+  if (!context || context.role !== 'owner') throw new Error('Hanya pemilik yang dapat mencabut kode undangan.');
+  return supabase.assistantAccess('revoke-invite', null, inviteId);
 }
 
 export async function rotateRecoveryCode() {

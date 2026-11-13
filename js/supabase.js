@@ -51,7 +51,7 @@ async function request(path, options = {}, retry = true) {
       );
     }
     if (path === '/functions/v1/reset-password' && error instanceof TypeError) {
-      throw new Error('Fungsi reset-password belum dapat dihubungi. Pastikan fungsi sudah dideploy dan secret APP_URL di Supabase sama persis dengan URL HTTPS aplikasi, lalu coba lagi.');
+      throw new Error('Fungsi pemulihan akun belum dapat dihubungi. Pastikan fungsi sudah dideploy dan secret APP_URL di Supabase sama persis dengan URL HTTPS aplikasi, lalu coba lagi.');
     }
     const isNetworkFailure = error instanceof TypeError
       || /failed to fetch|networkerror|load failed/i.test(error?.message || '');
@@ -73,8 +73,8 @@ async function request(path, options = {}, retry = true) {
       .filter(Boolean)
       .join(' ')
       .toLowerCase();
-    const message = /email.{0,30}rate limit|rate limit.{0,30}email|over_email_send_rate_limit/.test(authError)
-      ? 'Batas permintaan email tercapai. Tunggu sebelum mencoba lagi.'
+    const message = /rate limit|too many requests/.test(authError)
+      ? 'Batas permintaan tercapai. Tunggu sebelum mencoba lagi.'
       : result?.code === 'PGRST205'
       ? 'Tabel database WarungPintar belum dibuat. Jalankan berkas supabase/migrations/202610210001_warungpintar.sql melalui Supabase Dashboard > SQL Editor, lalu login kembali. Migration tersebut juga menyiapkan toko untuk akun Auth yang sudah terdaftar.'
       : result?.msg || result?.message || result?.error_description || result?.error || `Supabase menolak permintaan (${response.status}).`;
@@ -121,23 +121,14 @@ export async function refreshSession() {
 export async function restoreSession() {
   let current = savedSession();
   const callback = new URLSearchParams(location.hash.replace(/^#/, ''));
-  if (callback.has('access_token') && callback.has('refresh_token')) {
-    const type = callback.get('type');
-    current = {
-      access_token: callback.get('access_token'),
-      refresh_token: callback.get('refresh_token'),
-      expires_at: Number(callback.get('expires_at')) || undefined,
-      invite_flow: type === 'invite',
-      password_recovery: type === 'recovery',
-    };
-    saveSession(current);
+  if (callback.has('access_token') || callback.has('refresh_token')) {
     history.replaceState(null, '', location.pathname + location.search);
   }
   if (!current?.access_token) return null;
   if (current.expires_at && current.expires_at < Date.now() / 1000 + 60) {
     await refreshSession();
   }
-  return { user: await getUser(), invite: Boolean(current.invite_flow), passwordRecovery: Boolean(current.password_recovery) };
+  return { user: await getUser() };
 }
 
 export async function getUser() {
@@ -145,21 +136,29 @@ export async function getUser() {
   return result;
 }
 
-export async function updatePassword(password) {
-  const { result } = await request('/auth/v1/user', {
-    method: 'PUT',
-    body: JSON.stringify({ password }),
+export async function resetPassword(email, recoveryCode, newPassword) {
+  const { result } = await request('/functions/v1/reset-password', {
+    method: 'POST',
+    body: JSON.stringify({ email, recovery_code: recoveryCode, new_password: newPassword }),
   }, false);
-  const current = savedSession();
-  if (current) saveSession({ ...current, user: result, invite_flow: false, password_recovery: false });
   return result;
 }
 
-export async function resetPassword(email) {
-  const { result } = await request('/functions/v1/reset-password', {
+export async function issueAccountRecoveryCode() {
+  const { result } = await request('/functions/v1/account-recovery', {
     method: 'POST',
-    body: JSON.stringify({ email }),
+    body: JSON.stringify({}),
+  });
+  return result;
+}
+
+export async function acceptAssistant(email, password, inviteCode) {
+  saveSession(null);
+  const { result } = await request('/functions/v1/accept-assistant', {
+    method: 'POST',
+    body: JSON.stringify({ email, password, invite_code: inviteCode }),
   }, false);
+  if (result?.access_token && result?.refresh_token) saveSession(result);
   return result;
 }
 
@@ -239,18 +238,18 @@ export async function deleteStoreQris(storeId) {
   });
 }
 
-export async function inviteAssistant(email) {
+export async function inviteAssistant() {
   const { result } = await request('/functions/v1/invite-assistant', {
     method: 'POST',
-    body: JSON.stringify({ email }),
+    body: JSON.stringify({}),
   });
   return result;
 }
 
-export async function assistantAccess(action, userId) {
+export async function assistantAccess(action, userId, inviteId) {
   const { result } = await request('/functions/v1/assistant-access', {
     method: 'POST',
-    body: JSON.stringify({ action, user_id: userId }),
+    body: JSON.stringify({ action, user_id: userId, invite_id: inviteId }),
   });
   return result;
 }

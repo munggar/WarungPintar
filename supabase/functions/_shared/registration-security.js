@@ -1,4 +1,4 @@
-import { emailRateLimitFingerprint } from './reset-security.js';
+import { emailRateLimitFingerprint } from './account-recovery-security.js';
 
 const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const INVITE_CODE_PATTERN = /^[0-9a-f]{64}$/i;
@@ -67,7 +67,11 @@ export async function registerOwnerWithInvite({
       email,
       password,
       email_confirm: true,
-      user_metadata: { store_name: storeName, warungpintar_empty_vault: true },
+      user_metadata: {
+        store_name: storeName,
+        warungpintar_empty_vault: true,
+        owner_invite_reservation_id: reservationId,
+      },
     });
     if (createError) {
       return { status: 400, body: { error: 'Pendaftaran tidak berhasil. Periksa data dan kode undangan.' } };

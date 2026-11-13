@@ -1,8 +1,8 @@
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
 import {
   normalizeEmail,
-  requestPasswordResetEmail,
-} from '../_shared/reset-security.js';
+  recoverAccountWithCode,
+} from '../_shared/account-recovery-security.js';
 
 const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
@@ -12,9 +12,7 @@ function responseHeaders(request: Request) {
   if (!configuredAppUrl) throw new Error('APP_URL tidak dikonfigurasi.');
   const allowedOrigin = new URL(configuredAppUrl).origin;
   const localOrigin = /^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin);
-  if (origin && origin !== allowedOrigin && !localOrigin) {
-    throw new Error('Origin tidak diizinkan.');
-  }
+  if (origin && origin !== allowedOrigin && !localOrigin) throw new Error('Origin tidak diizinkan.');
   return {
     'Access-Control-Allow-Origin': origin || allowedOrigin,
     'Access-Control-Allow-Headers': 'authorization, apikey, content-type, x-client-info',
@@ -34,16 +32,12 @@ Deno.serve(async (request) => {
   }
 
   if (request.method === 'OPTIONS') return new Response('ok', { headers });
-  if (request.method !== 'POST') {
-    return Response.json({ error: 'Method not allowed.' }, { status: 405, headers });
-  }
+  if (request.method !== 'POST') return Response.json({ error: 'Method not allowed.' }, { status: 405, headers });
 
   const url = Deno.env.get('SUPABASE_URL');
-  const anonKey = Deno.env.get('SUPABASE_ANON_KEY');
   const serviceKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY');
-  const appUrl = Deno.env.get('APP_URL');
   const rateLimitSecret = Deno.env.get('RESET_RATE_LIMIT_SECRET');
-  if (!url || !anonKey || !serviceKey || !appUrl || !rateLimitSecret || rateLimitSecret.length < 32) {
+  if (!url || !serviceKey || !rateLimitSecret || rateLimitSecret.length < 32) {
     return Response.json({ error: 'Layanan pemulihan belum dapat diproses.' }, { status: 503, headers });
   }
 
@@ -54,33 +48,34 @@ Deno.serve(async (request) => {
     }
 
     const email = normalizeEmail(payload.email);
+    const recoveryCode = String(payload.recovery_code ?? '').trim();
+    const newPassword = String(payload.new_password ?? '');
     if (!EMAIL_PATTERN.test(email) || email.length > 254) {
       return Response.json({ error: 'Alamat email tidak valid.' }, { status: 400, headers });
     }
-    if (payload.recoveryCode != null || payload.password != null) {
-      return Response.json(
-        { error: 'Pemulihan kata sandi harus dilanjutkan melalui tautan yang dikirim ke email.' },
-        { status: 400, headers },
-      );
+    if (newPassword.length < 8 || newPassword.length > 128) {
+      return Response.json({ error: 'Password harus terdiri dari 8 sampai 128 karakter.' }, { status: 400, headers });
+    }
+    if (!/^[0-9a-f]{64}$/i.test(recoveryCode)) {
+      return Response.json({ error: 'Email atau kode pemulihan tidak valid, kedaluwarsa, atau sudah digunakan.' }, { status: 400, headers });
     }
 
-    const rateLimiter = createClient(url, serviceKey, { auth: { persistSession: false } });
-    const authClient = createClient(url, anonKey, { auth: { persistSession: false } });
-    const result = await requestPasswordResetEmail({
-      rateLimiter,
-      authClient,
+    const admin = createClient(url, serviceKey, { auth: { persistSession: false } });
+    const result = await recoverAccountWithCode({
+      admin,
       email,
+      recoveryCode,
+      newPassword,
       rateLimitSecret,
-      redirectTo: new URL(appUrl).origin,
     });
-    return Response.json(result, { status: 202, headers });
+    return Response.json(result.body, { status: result.status, headers });
   } catch (error) {
     console.error(
-      'Permintaan email pemulihan gagal diproses:',
+      'Pemulihan akun gagal diproses:',
       error instanceof Error ? error.name : 'Kesalahan tidak diketahui.',
     );
     return Response.json(
-      { error: 'Permintaan pemulihan belum dapat diproses. Coba kembali nanti.' },
+      { error: 'Pemulihan akun belum dapat diproses. Periksa kode dan koneksi, lalu coba kembali.' },
       { status: 503, headers },
     );
   }

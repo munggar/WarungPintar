@@ -104,6 +104,7 @@ test('owner invite creates a user, obtains a password session, and consumes the 
   assert.deepEqual(createCall.attributes.user_metadata, {
     store_name: 'Warung A',
     warungpintar_empty_vault: true,
+    owner_invite_reservation_id: 'reservation-1',
   });
   assert.equal(createCall.attributes.email_confirm, true);
   assert.deepEqual(calls.map((call) => call.type), [
@@ -113,7 +114,7 @@ test('owner invite creates a user, obtains a password session, and consumes the 
     'signInWithPassword',
     'rpc',
   ]);
-  assert.equal(calls.some((call) => /otp|verify|resend|invite|reset/i.test(call.type)), false);
+  assert.equal(calls.some((call) => /otp|verify|resend|email/i.test(call.type)), false);
 });
 
 test('invalid owner invitation prevents user creation', async () => {
