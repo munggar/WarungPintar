@@ -273,6 +273,12 @@ export function currentContext() {
   return context ? { userId: context.userId, email: context.email, storeId: context.storeId, storeName: context.storeName, role: context.role } : null;
 }
 
+export async function smartKasbon(action, payload = {}) {
+  if (!context) throw new Error('Login diperlukan untuk menggunakan Smart Kasbon.');
+  if (!navigator.onLine) throw new Error('Kasbon baru dan pembayaran kasbon memerlukan koneksi untuk validasi limit di server.');
+  return supabase.smartKasbon({ ...payload, action, store_id: context.storeId });
+}
+
 export function hasOfflineAccount() {
   return Boolean(localStorage.getItem(OFFLINE_KEY));
 }

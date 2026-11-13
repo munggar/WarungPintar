@@ -3,3 +3,6 @@ verify_jwt = false
 
 [functions.reset-password]
 verify_jwt = false
+
+[functions.smart-kasbon]
+verify_jwt = true

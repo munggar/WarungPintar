@@ -71,7 +71,7 @@ async function request(path, options = {}, retry = true) {
   return { result, headers: response.headers };
 }
 
-export async function register(email, password, storeName) {
+export async function register(email, password, storeName, inviteCode) {
   saveSession(null);
   const { result } = await request('/functions/v1/register-owner', {
     method: 'POST',
@@ -79,6 +79,7 @@ export async function register(email, password, storeName) {
       email,
       password,
       store_name: storeName,
+      invite_code: inviteCode,
     }),
   }, false);
   localStorage.setItem(NEW_REGISTRATION_KEY, email.trim().toLowerCase());
@@ -161,6 +162,14 @@ export async function resetPassword(email, recoveryCode, password) {
   const { result } = await request('/functions/v1/reset-password', {
     method: 'POST',
     body: JSON.stringify({ email, recoveryCode, password }),
+  });
+  return result;
+}
+
+export async function smartKasbon(payload) {
+  const { result } = await request('/functions/v1/smart-kasbon', {
+    method: 'POST',
+    body: JSON.stringify(payload),
   });
   return result;
 }

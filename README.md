@@ -41,6 +41,7 @@ Beberapa hal yang menjadi fokus pengembangan:
 | Pengelolaan stok | Stok berkurang saat penjualan dan bertambah saat pembelian melalui transaksi atomik. |
 | Pengeluaran usaha | Mencatat pengeluaran berdasarkan kategori dan memisahkan penarikan pribadi dari biaya usaha. |
 | Kasbon dan cicilan | Mengelola piutang pelanggan, pembayaran cicilan, status lunas, dan tanggal jatuh tempo. |
+| Smart Kasbon | Menghitung batas internal berbasis aturan dari snapshot browser, input kebijakan pemilik, dan risiko pembayaran; ledger baru divalidasi secara atomik di Supabase, tetapi angka finansial tidak diverifikasi independen. |
 | Laporan usaha | Menampilkan ringkasan laba rugi, grafik omzet, dan daftar barang terjual. |
 | Dukungan offline | Menyimpan data lokal terenkripsi di IndexedDB dan menyinkronkannya dengan pemeriksaan revisi saat koneksi tersedia. |
 | Peringatan stok dan produk lambat laku | Menampilkan peringatan di halaman Beranda berdasarkan aturan yang dijelaskan pada bagian [Perhitungan Bisnis](#perhitungan-bisnis). |
@@ -69,6 +70,7 @@ Beberapa hal yang menjadi fokus pengembangan:
 | F13 | Akses layanan zakat Lazismu | Tautan ke layanan Zakat Perusahaan Lazismu. | Menu, Zakat Usaha |
 | F14 | Ekspor laporan | XLSX, CSV, dan cetak atau simpan PDF melalui browser. | Laporan |
 | F15 | Pemisahan penarikan pribadi | Penarikan pribadi dicatat terpisah dari pengeluaran usaha. | Pengeluaran |
+| F16 | Smart Kasbon | Limit adaptif rule-based, skor risiko riwayat pelanggan, dan validasi ledger atomik di server. | Kasbon |
 | — | Sinkronisasi data | Tersedia setelah migrasi basis data dan Edge Functions diterapkan pada proyek Supabase. | Pengaturan |
 
 **Batasan sinkronisasi:** mekanisme saat ini menggunakan pemeriksaan revisi untuk menghindari penimpaan data tanpa pemberitahuan. Mekanisme ini menyinkronkan salinan data terenkripsi, bukan antrean operasi atau penggabungan perubahan per rekaman. Jika data diubah bersamaan pada beberapa perangkat, pengguna harus memilih salinan dari server atau perangkat. Pilihan tersebut dapat mengganti seluruh data toko pada perangkat, sehingga pengujian multi-perangkat dan kondisi jaringan terputus diperlukan sebelum penerapan.
@@ -87,6 +89,49 @@ Beberapa hal yang menjadi fokus pengembangan:
 
 Aplikasi memerlukan konfigurasi Supabase, proses build untuk bundle pemindai barcode, dan server web. Jangan membuka berkas HTML langsung melalui `file://`, karena browser membatasi modul JavaScript dan service worker pada skema tersebut.
 
+### Environment staging lokal
+
+Konfigurasi lokal melalui `js/config.local.js` hanya dibaca di `localhost`, sehingga file itu tidak mengaktifkan staging pada domain deployment. Build Render staging memakai runtime config terpisah yang dibuat saat build dan tidak fallback ke konfigurasi production jika tidak valid. Proyek ini memakai HTML dan JavaScript ES Modules; file `.env` tidak otomatis dibaca browser.
+
+1. Salin template ke file lokal yang diabaikan Git:
+
+   ```powershell
+   Copy-Item js/config.local.example.js js/config.local.js
+   ```
+
+2. Dari Supabase Dashboard proyek **staging**, isi `SUPABASE_URL` dan `SUPABASE_PUBLISHABLE_KEY` di `js/config.local.js`. Gunakan hanya URL project dan Publishable Key dengan prefix `sb_publishable_`. Jangan masukkan database password, secret key, service_role key, access token, atau nilai secret lainnya ke file frontend.
+3. Periksa pemilihan konfigurasi tanpa mengirim permintaan koneksi:
+
+   ```powershell
+   npm run config:check
+   ```
+
+   Output hanya memuat nama environment, URL, project reference, serta status ketersediaan key; nilai key tidak pernah ditampilkan. Saat staging siap, output harus menyebut `staging`, URL/ref yang sama dengan proyek staging di Dashboard, dan key `available`. Ini memeriksa konfigurasi lokal, bukan konektivitas Supabase.
+4. Jalankan aplikasi lokal (`npm start`) dan pastikan badge **STAGING** terlihat. Badge menunjukkan konfigurasi staging dipilih, bukan bahwa koneksi jaringan sudah teruji.
+
+Untuk menonaktifkan staging, kosongkan kedua nilai URL/key di `js/config.local.js` atau hapus file itu, lalu muat ulang aplikasi. Checker dan aplikasi akan kembali memakai konfigurasi produksi. File ini sengaja tidak masuk cache service worker.
+
+Build saat ini hanya membundel pemindai barcode; konfigurasi lokal bukan bagian dari bundle. Untuk deployment produksi, deploy berkas yang dilacak Git, bukan seluruh working directory, dan pastikan `js/config.local.js` serta `supabase/.env.local` tidak ada dalam artefak. Selain diabaikan Git, override browser hanya aktif pada hostname lokal.
+
+Konfigurasi CLI staging terpisah di `supabase/.env.local`; file ini bukan sumber konfigurasi browser. Salin `supabase/.env.local.example` jika perlu membuat ulang, lalu isi Project Reference ID dan database password dari proyek staging. Jangan menjalankan `supabase link`, migration, atau deploy sebelum memeriksa ulang Project Reference ID terhadap Dashboard staging. Bila nanti CLI di-link, target harus diambil dari `SUPABASE_PROJECT_ID` staging yang telah diverifikasi—jangan memakai perintah production di bagian berikut.
+
+### Deployment frontend staging di Render
+
+Deployment ini membuat Static Site terpisah dan tidak mengubah service, konfigurasi, atau data production. Buat service secara manual di Render; service staging belum otomatis dibuat atau dideploy oleh repository ini.
+
+1. Buat **New Static Site** dari repository `munggar/WarungPintar`, branch `main`, dengan nama persis `warungpintar-frontend-staging`. Biarkan Root Directory kosong (root repository), dan nonaktifkan Auto-Deploy sampai konfigurasi staging diperiksa.
+2. Atur:
+   - Build Command: `npm ci --include=dev && npm run build:staging`
+   - Publish Directory: `dist-staging`
+3. Tambahkan environment variables berikut pada service staging:
+   - `WP_ENVIRONMENT=staging`
+   - `SUPABASE_URL=https://unkmykhwddwhbtuioqrg.supabase.co`
+   - `SUPABASE_PUBLISHABLE_KEY` = Publishable Key dari Supabase Dashboard proyek staging. Jangan gunakan Secret Key, `service_role`, access token, atau database password.
+   - `STAGING_EXPECTED_PROJECT_REF=unkmykhwddwhbtuioqrg`
+4. Simpan konfigurasi, jalankan deploy manual, lalu pastikan URL deployment memakai HTTPS dan halaman menampilkan badge **STAGING**. Periksa juga bahwa build gagal bila service bukan bernama `warungpintar-frontend-staging`, variabel menunjuk ke project lain, atau konfigurasi staging tidak tersedia. Jangan mengarahkan service production yang sudah ada ke `dist-staging`.
+
+Build menghasilkan bundle barcode scanner secara terpisah, marker environment, dan cache service worker staging yang unik. Artefak hanya menyalin asset frontend yang diperlukan; konfigurasi lokal, secret, `supabase/`, migration, test, dan `node_modules` tidak disertakan. Build lokal tanpa `RENDER_SERVICE_NAME` dan `RENDER_EXTERNAL_URL` diperbolehkan untuk pemeriksaan; pada Render, kedua variabel itu divalidasi jika tersedia. `SUPABASE_PUBLISHABLE_KEY` tetap dapat dibaca pengguna karena frontend berjalan di browser, sehingga keamanan data harus ditegakkan oleh RLS dan backend—key ini bukan secret.
+
 ### Prasyarat
 
 - Node.js dan npm.
@@ -101,8 +146,9 @@ Buka Supabase Dashboard → **SQL Editor**, lalu jalankan migrasi berikut secara
 1. `supabase/migrations/202610210001_warungpintar.sql`
 2. `supabase/migrations/202610220001_store_data_updated_at_wib.sql`
 3. `supabase/migrations/202610230001_store_qris_storage.sql`
+4. `supabase/migrations/202610240001_smart_kasbon.sql`
 
-Migrasi kedua menyesuaikan `store_data.updated_at` dengan waktu WIB. Migrasi ketiga membuat bucket QRIS privat dengan kebijakan akses pemilik dan anggota. Aplikasi tidak dapat membuat tabel atau bucket menggunakan publishable key.
+Migrasi kedua menyesuaikan `store_data.updated_at` dengan waktu WIB. Migrasi ketiga membuat bucket QRIS privat dengan kebijakan akses pemilik dan anggota. Migrasi keempat menambahkan ledger Smart Kasbon pseudonim dan fungsi transaksi server. Migrasi keamanan akun menambahkan undangan owner satu kali serta penyimpanan rate limit pemulihan. Aplikasi tidak dapat membuat tabel atau bucket menggunakan publishable key.
 
 ### 2. Atur URL autentikasi
 
@@ -110,27 +156,49 @@ Pada Supabase Dashboard → **Authentication → URL Configuration**, tetapkan *
 
 ### 3. Terapkan Supabase Edge Functions
 
-Dari folder proyek, masuk ke Supabase CLI dan hubungkan proyek. Periksa kembali project reference sebelum menjalankan perintah.
+Bagian ini adalah alur penerapan **production yang sudah ada**, bukan instruksi untuk staging. Perintah `supabase link` di bawah tetap menargetkan project production; jangan jalankan untuk mengonfigurasi staging.
 
-```bash
+```powershell
 npx supabase login
 npx supabase link --project-ref skvskjrhhekwvkwuxjec
-npx supabase secrets set APP_URL="https://warungpintar-ijd1.onrender.com"
-npx supabase functions deploy register-owner
-npx supabase functions deploy invite-assistant
-npx supabase functions deploy assistant-access
-npx supabase functions deploy reset-password
+$resetSecret = node -e "process.stdout.write(require('node:crypto').randomBytes(32).toString('hex'))"
+npx supabase secrets set APP_URL="https://warungpintar-ijd1.onrender.com" RESET_RATE_LIMIT_SECRET="$resetSecret"
+Remove-Variable resetSecret
 ```
 
 Ganti nilai `APP_URL` dengan origin HTTPS aplikasi Anda jika domain Render berbeda. Nilai ini harus sama persis dengan **Site URL** pada Supabase Authentication → URL Configuration dan origin yang membuka aplikasi. Untuk pengembangan lokal, ubah sementara nilainya ke `http://localhost:8080`; fungsi juga menerima `http://localhost` dan `http://127.0.0.1` pada port apa pun.
 
+Terapkan migration `202611130001_registration_and_recovery_security.sql` setelah migration toko awal dan sebelum deploy `register-owner`/`reset-password`. Periksa urutan migration dan project reference; jangan jalankan pada production tanpa persetujuan serta backup.
+
+Setelah migration berhasil diterapkan pada target yang telah diverifikasi, deploy fungsi:
+
+```powershell
+npx supabase functions deploy register-owner
+npx supabase functions deploy invite-assistant
+npx supabase functions deploy assistant-access
+npx supabase functions deploy reset-password
+npx supabase functions deploy smart-kasbon
+```
+
 Fungsi `reset-password` menerima pemulihan tanpa sesi login dan memverifikasi kunci pemulihan sebelum mengubah kata sandi. Karena itu, `supabase/config.toml` menonaktifkan verifikasi JWT gateway untuk fungsi ini; jangan menghapus pemeriksaan kunci pemulihan di fungsi tersebut.
+
+`RESET_RATE_LIMIT_SECRET` wajib diisi dengan secret acak minimal 32 karakter; fungsi menggunakannya sebagai HMAC key, bukan menyimpan email mentah pada tabel pembatasan. Jangan memakai contoh placeholder, membagikan secret, atau memasukkannya ke repository. Setelah penerapan migration keamanan akun, fungsi membatasi 10 percobaan pemulihan per alamat per jam. Tanggapan untuk email/kunci yang tidak cocok, akun tidak ditemukan, dan permintaan yang dibatasi dibuat sama untuk mencegah account enumeration.
+
+Fungsi `smart-kasbon` memerlukan sesi JWT dan keanggotaan toko yang valid. Konfigurasinya mempertahankan verifikasi JWT gateway. Fungsi ini hanya dapat digunakan setelah migrasi Smart Kasbon diterapkan.
 
 ### 4. Aktifkan autentikasi
 
-Aktifkan penyedia autentikasi email dan kata sandi pada Supabase Auth. Pendaftaran menggunakan fungsi `register-owner` untuk membuat sesi akun baru.
+Aktifkan penyedia autentikasi email dan kata sandi pada Supabase Auth dan **nonaktifkan Confirm email**. Pendaftaran memerlukan kode undangan owner satu kali yang terikat ke alamat email; akun dibuat melalui Auth `signUp` dan tidak meminta tautan/verifikasi email. Jika Confirm email aktif, fungsi menolak menyelesaikan pendaftaran dan membersihkan akun sementara.
 
-Atur kebijakan kata sandi minimal 8 karakter pada Supabase Authentication agar persyaratan tersebut juga diterapkan oleh server. Fungsi pendaftaran menggunakan Supabase Admin API dan mengonfirmasi akun secara langsung (`email_confirm: true`), sehingga kepemilikan alamat email tidak diverifikasi saat pendaftaran. Pertimbangkan risiko pendaftaran menggunakan alamat email pihak lain sebelum menerapkan konfigurasi ini. Pengaturan ulang kata sandi tetap menggunakan email pemulihan.
+Terapkan migration `202611130001_registration_and_recovery_security.sql`, lalu terbitkan undangan untuk setiap owner melalui Supabase SQL Editor sebagai administrator:
+
+```sql
+select public.create_owner_registration_invite('pemilik@example.com');
+```
+
+Salin kode acak yang dikembalikan dan bagikan kepada orang yang disetujui melalui kanal privat. Kode berlaku 7 hari, terikat ke email tersebut, dan hanya dapat dipakai sekali. Menerbitkan kode baru untuk email yang sama akan membatalkan kode sebelumnya. Kode undangan adalah bearer secret: kebocorannya memungkinkan pihak lain yang memegang kode membuat akun dengan alamat yang disetujui. Karena aplikasi tidak memverifikasi email, kode ini **bukan bukti kepemilikan mailbox**; jangan memperlakukan alamat email sebagai identitas yang sudah diverifikasi. Untuk skala terbuka, pertimbangkan verifikasi nomor telepon atau proses persetujuan identitas terpisah.
+
+Atur kebijakan kata sandi minimal 8 karakter pada Supabase Authentication agar persyaratan tersebut juga diterapkan oleh server. Jangan mengaktifkan Confirm email untuk menghindari pengiriman verification link; aplikasi tetap mensyaratkan kode undangan.
 
 ### 5. Instal dependensi dan jalankan server
 
@@ -150,13 +218,13 @@ Setelah build selesai, jalankan salah satu server berikut:
 
 ### 6. Buka aplikasi
 
-Buka `http://localhost:8080` dan daftarkan akun pemilik menggunakan email, nama toko, serta kata sandi minimal 8 karakter. Fungsi `register-owner` membuat sesi tanpa tautan verifikasi email. Terapkan ulang fungsi tersebut setelah ada perubahan kode.
+Buka `http://localhost:8080` dan daftarkan akun pemilik menggunakan email, nama toko, kata sandi minimal 8 karakter, dan kode undangan yang telah diterbitkan admin. Fungsi `register-owner` membuat sesi tanpa tautan verifikasi email. Terapkan ulang fungsi tersebut setelah ada perubahan kode.
 
 Jika muncul pesan `Failed to fetch`, pastikan fungsi telah diterapkan pada proyek Supabase yang sesuai dengan konfigurasi di `js/config.js`.
 
 Simpan kunci pemulihan saat ditampilkan. Kunci tersebut tidak disimpan di server. Jika dibutuhkan oleh asisten, bagikan melalui saluran komunikasi yang aman.
 
-Pemulihan kata sandi dilakukan pada formulir **Lupa kata sandi** tanpa tautan email: masukkan email akun, kunci pemulihan, dan kata sandi baru. Edge Function `reset-password` harus dideploy agar fitur dapat memverifikasi kunci pemulihan dan memperbarui kata sandi melalui Supabase Admin API.
+Pemulihan kata sandi dilakukan pada formulir **Lupa kata sandi** tanpa tautan email: masukkan email akun, kunci pemulihan, dan kata sandi baru. Edge Function `reset-password` harus dideploy bersama migration keamanan akun dan `RESET_RATE_LIMIT_SECRET`. Aplikasi menampilkan hasil generik dan tidak otomatis masuk; jika pasangan email/kunci cocok, masuk kembali dengan kata sandi baru. Kunci pemulihan yang dibuat aplikasi memiliki 160 bit acak dan harus disimpan secara terpisah.
 
 **Catatan akun dan data awal:** pendaftaran akun autentikasi dan pembuatan tabel merupakan proses yang berbeda. Periksa akun melalui Supabase Dashboard → **Authentication → Users**, bukan Table Editor. Jika alamat email sudah terdaftar, gunakan akun yang ada atau hapus akun melalui Dashboard sebelum mendaftar kembali. Setelah migrasi dijalankan, pengisian awal akan membuat toko dan keanggotaan pemilik untuk akun autentikasi yang sudah ada.
 
@@ -184,7 +252,7 @@ Pengujian tersebut mencakup logika bisnis, struktur XLSX, enkripsi, pemulihan ka
 3. **Kasir:** pilih produk atau cari menggunakan barcode, tentukan metode pembayaran, lalu simpan transaksi. Untuk transfer, periksa pembayaran sebelum menyelesaikan transaksi. Transaksi QRIS berstatus **menunggu konfirmasi** sampai kasir mencocokkan pembayaran di luar aplikasi dan mengonfirmasikannya secara manual. QRIS statis tidak memverifikasi pembayaran secara otomatis. Pembatalan transaksi mengembalikan stok. Untuk kasbon, pilih pelanggan dan tanggal jatuh tempo.
 4. **Belanja barang:** ketik nama barang dan pilih saran untuk menambah stok produk yang sudah ada. Jika barang belum tersedia, pilih **Tambah barang baru**, lengkapi kategori, harga jual, dan satuan; produk langsung dibuat dengan stok awal sesuai jumlah belanja. Harga beli dan total belanja disimpan di riwayat pembelian stok, bukan pengeluaran operasional, agar harga pokok barang tidak dihitung dua kali pada laba. Semua kolom nominal harga memakai pemisah ribuan titik.
 5. **Pengeluaran:** catat biaya operasional dan penarikan pribadi. Penarikan pribadi dicatat terpisah dari biaya usaha.
-6. **Kasbon:** catat pembayaran cicilan. Tombol pengingat membuka WhatsApp dengan pesan yang dapat ditinjau dan dikirim oleh pengguna.
+6. **Kasbon:** saat pertama kali membuka halaman, pemilik menyinkronkan riwayat piutang pseudonim ke server dan mengatur kondisi kas/modal kerja serta batas kebijakan. Nilai kas aktual harus dikonfirmasi pemilik karena tidak dilacak otomatis oleh aplikasi. Kasbon baru dan pembayaran divalidasi server dan memerlukan koneksi internet. Dashboard menampilkan kondisi usaha dan risiko pelanggan. Tombol pengingat membuka WhatsApp dengan pesan yang dapat ditinjau dan dikirim oleh pengguna.
 7. **Laporan:** pilih periode untuk melihat ringkasan laba rugi, grafik omzet, dan daftar barang terjual beserta jumlah, omzet, serta laba kotor. Ekspor CSV dan XLSX mencakup transaksi pada periode yang dipilih.
 8. **Zakat Usaha:** pilih **Buka Zakat Perusahaan Lazismu** untuk membuka [layanan Zakat Perusahaan Lazismu](https://donasi.lazismu.org/zakatperusahaan). Perhitungan dan pembayaran berlangsung di situs Lazismu. Aplikasi tidak mengirim data atau menerima konfirmasi pembayaran.
 9. **Struk transaksi:** unduh PDF/JPG atau bagikan melalui fitur Web Share jika didukung browser. Jika berbagi berkas tidak didukung, unduh berkas lalu lampirkan secara manual.
@@ -197,6 +265,8 @@ Pengujian tersebut mencakup logika bisnis, struktur XLSX, enkripsi, pemulihan ka
 - **Stok menipis** = stok berada pada atau di bawah batas minimum, atau diperkirakan habis sebelum barang pengganti tiba. Perkiraan penjualan menggunakan rata-rata tujuh hari terakhir.
 - **Produk lambat terjual** = produk masih memiliki stok, tidak terjual selama 30 hari, dan telah tercatat lebih dari 30 hari.
 - **Skor Kesehatan Usaha** memiliki rentang 0–100 dan menggunakan data 30 hari: margin bersih bernilai 40 poin dengan target 15%; perputaran stok bernilai 30 poin dengan target 1× berdasarkan HPP dibanding nilai stok; dan rasio piutang bernilai 30 poin, dengan rasio 0% memperoleh nilai penuh dan rasio 30% atau lebih memperoleh 0 poin.
+- **Smart Kasbon:** batas total absolut dihitung dari nilai terkecil antara batas kebijakan, kas tersedia setelah cadangan, dan modal kerja setelah kewajiban, lalu dikalikan faktor kesehatan. Saldo piutang aktif yang sudah ada diperhitungkan sekali saat backend memeriksa `piutang_aktif + kasbon_baru <= batas_total`; sisa limit adalah batas total dikurangi piutang aktif. Faktor kesehatan adalah 0 untuk kritis, 0,1 cold start, 0,2 menurun, 0,35 stagnan, 0,6 stabil, 0,8 sehat, dan 1 untuk sangat sehat. Skor risiko pelanggan (0–100) dihitung sebagai `100 − 50 × proporsi pelunasan terlambat − 30 × proporsi saldo jatuh tempo − 20 × rata-rata keterlambatan/30 hari` (komponen terakhir dibatasi maksimal 20 poin). Risiko tinggi menolak kasbon baru, risiko sedang membatasi limit pelanggan menjadi separuh, dan risiko rendah tidak memberi pengali tambahan. Transaksi memakai penguncian per toko di database agar dua permintaan bersamaan tidak melewati batas. Angka kas, modal kerja, dan snapshot finansial berasal dari pemilik/browser; backend tidak dapat memverifikasi kesesuaiannya dengan vault terenkripsi. Karena itu limit ini hanya aturan internal berdasarkan input tepercaya, bukan jaminan kesehatan usaha atau audit kemampuan membayar. Ringkasan yang dipakai harus berumur kurang dari tujuh hari.
+- **Status ML:** model machine learning belum dilatih atau digunakan untuk keputusan. Sampai tersedia jumlah data historis yang memadai dan evaluasi holdout yang terukur, semua keputusan dibuat oleh aturan yang ditampilkan secara eksplisit.
 - **Zakat:** perhitungan dilakukan pada layanan Lazismu yang dibuka dari menu Zakat Usaha. Aplikasi tidak menyediakan kalkulator zakat internal.
 
 ## Struktur Proyek
@@ -222,19 +292,25 @@ warungpintar/
 │   └── db.js                        # Penyimpanan IndexedDB terenkripsi
 ├── supabase/
 │   ├── migrations/                  # Skema, trigger, dan kebijakan RLS
-│   └── functions/                   # Edge Functions untuk pendaftaran dan asisten
+│   └── functions/                   # Edge Functions untuk akun, asisten, dan Smart Kasbon
 ├── icons/                           # Ikon aplikasi
 └── tests/
-    └── logic.test.js                # Pengujian unit
+    ├── logic.test.js                # Pengujian logika bisnis
+    └── smart-kasbon.test.js         # Pengujian snapshot keuangan
 ```
 
-Skema Supabase mencakup `stores`, `store_members`, `store_invites`, `store_data` (payload AES-GCM), dan `key_envelopes` (kunci penyimpanan terenkripsi yang dibungkus dengan kata sandi akun untuk setiap anggota). IndexedDB menyimpan salinan data bisnis dalam satu rekaman AES-GCM. Tabel lama dibersihkan saat migrasi pertama setelah masuk.
+Skema Supabase mencakup `stores`, `store_members`, `store_invites`, `store_data` (payload AES-GCM), `key_envelopes` (kunci penyimpanan terenkripsi yang dibungkus dengan kata sandi akun untuk setiap anggota), serta ledger khusus Smart Kasbon. IndexedDB menyimpan salinan data bisnis dalam satu rekaman AES-GCM. Tabel lama dibersihkan saat migrasi pertama setelah masuk.
 
 ## Keamanan dan Batasan
 
 - **Migrasi Supabase wajib diterapkan** sebelum pendaftaran dan akses basis data dapat digunakan. Terapkan Edge Functions untuk pendaftaran dan undangan asisten. URL proyek dan publishable key tidak memberikan izin untuk membuat skema. Jangan pernah menempatkan service-role key pada kode browser atau commit ke repository.
 - URL Supabase dan publishable key untuk browser disimpan di `js/config.js`. Publishable key memang bersifat publik. Service-role key hanya boleh digunakan pada Edge Function.
 - Data bisnis di server dan IndexedDB dienkripsi menggunakan AES-GCM. Kunci penyimpanan terenkripsi dibungkus dengan kata sandi menggunakan PBKDF2. Server tidak menerima data bisnis dalam bentuk terbuka, tetapi data tersedia di memori browser saat aplikasi digunakan.
+- **Pengecualian metadata Smart Kasbon:** agar Supabase dapat menegakkan limit dan mengunci transaksi bersamaan, backend menyimpan nominal kasbon/pembayaran, tanggal, ringkasan keuangan agregat, dan ID pelanggan pseudonim. Nama serta nomor WhatsApp tetap berada di vault terenkripsi. Metadata ini tidak dienkripsi end-to-end seperti vault dan dapat dibaca operator proyek Supabase; pastikan pemilik menyetujui sebelum menerapkan migrasi.
+- ID pelanggan, kasbon, dan pembayaran yang dikirim dari client diturunkan secara deterministik dengan SHA-256 dan namespace toko, tanpa secret salt. Ini adalah pseudonimisasi, bukan anonimisasi; metadata terkait tetap dapat dikaitkan dan ID asal yang diketahui dapat diuji. `actor_id` tetap ID pengguna autentikasi. Migrasi ke keyed hashing memerlukan pengelolaan kunci bersama perangkat dan migrasi identitas ledger.
+- Snapshot finansial berasal dari vault pada browser dan backend hanya memvalidasi bentuk serta rentang nilainya. Backend tidak dapat membuktikan nilainya sama dengan transaksi terenkripsi; kas, modal kerja, kewajiban, dan cadangan juga merupakan input pemilik. Perlakukan hasil limit sebagai aturan internal berbasis input yang dipercaya, bukan pemeriksaan kas independen.
+- Waktu pembayaran baru ditetapkan oleh waktu database server; tanggal pembayaran tidak dapat dipilih pada form. Riwayat yang di-bootstrap tetap memakai timestamp lama dari vault dan belum diverifikasi secara independen.
+- Smart Kasbon tidak menerima kasbon baru atau pembayaran saat offline. Penghapusan riwayat transaksi lokal menandai ledger server sebagai batal saat koneksi tersedia; jika offline, aplikasi menyimpan permintaan pembersihan dan mencobanya saat pemilik membuka Kasbon kembali. Reset seluruh toko juga mereset kebijakan Smart Kasbon.
 - **Simpan kunci pemulihan secara terpisah.** Kata sandi yang diatur ulang tidak dapat membuka data terenkripsi yang sudah ada tanpa kunci pemulihan. Jika kata sandi dan kunci pemulihan hilang, data terenkripsi tidak dapat dipulihkan.
 - Berkas cadangan juga dienkripsi. Jika data browser dihapus tanpa cadangan dan tanpa akses ke akun Supabase, data lokal tidak dapat dipulihkan.
 - Asisten memerlukan kunci pemulihan dari pemilik untuk membuka data pada perangkat atau akun baru. Kunci tidak dikirim melalui email undangan. Semua anggota menggunakan penyimpanan data bersama; pembatasan menu bukan isolasi kriptografis per tabel. Data yang telah dibuka pada perangkat offline tidak dapat ditarik kembali.
@@ -246,7 +322,7 @@ Skema Supabase mencakup `stores`, `store_members`, `store_invites`, `store_data`
 - Tautan WhatsApp membuka aplikasi dengan pesan yang telah disiapkan; pengguna tetap perlu meninjau dan mengirim pesan. Lampiran struk tidak dikirim otomatis. Jika fitur berbagi tidak tersedia, unduh berkas dan lampirkan secara manual.
 - Aplikasi tidak mengirim notifikasi push. Peringatan ditampilkan saat aplikasi dibuka.
 - Pemindai kamera belum terintegrasi dengan antarmuka kasir. Kasir mendukung pencarian barcode melalui kolom produk atau pemindai eksternal yang berfungsi sebagai papan ketik.
-- Fungsi pendaftaran mengonfirmasi alamat email secara langsung. Pertimbangkan risiko pendaftaran menggunakan alamat email pihak lain sebelum menerapkannya pada layanan publik.
+- Pendaftaran owner memerlukan undangan satu kali; undangan membatasi pembuatan akun publik, tetapi tidak membuktikan kepemilikan email. Pemulihan akun dibatasi 10 percobaan per email per jam; pemilik yang berbagi jaringan masih dapat mengalami pembatasan pada alamat yang sama.
 - Sesi dan kunci pembuka data disimpan pada perangkat setelah masuk agar aplikasi tidak meminta autentikasi ulang setiap kali dibuka. Gunakan hanya pada perangkat pribadi yang terlindungi. Pengguna lain yang dapat mengakses profil browser berpotensi membuka data toko. Tombol **Keluar** menghapus sesi dan kunci yang tersimpan pada perangkat.
 
 ## Pemecahan Masalah
@@ -255,10 +331,13 @@ Skema Supabase mencakup `stores`, `store_members`, `store_invites`, `store_data`
 |---|---|
 | Halaman kosong atau aplikasi gagal dimulai | Pastikan aplikasi dijalankan melalui server web, bukan `file://`. Coba keluar dari mode privat browser. |
 | Pemindai barcode tidak berfungsi | Jalankan `npm run build`. Sebagai alternatif, cari produk atau gunakan pemindai eksternal melalui kolom Kasir. |
-| Pendaftaran gagal karena akun sudah terdaftar | Gunakan akun yang sudah ada atau hapus akun melalui Authentication → Users sebelum mendaftar kembali. |
+| Kode pendaftaran ditolak | Pastikan kode belum dipakai/kedaluwarsa dan email yang dimasukkan sama dengan email undangan. Minta admin menerbitkan kode baru. |
+| Pendaftaran tidak membuat sesi | Pastikan Supabase Auth → Providers → Email → Confirm email dinonaktifkan; aplikasi tidak mengirim verification link. |
 | Akun tidak terlihat di Table Editor | Akun berada di Authentication → Users. Pastikan migrasi basis data telah dijalankan. |
 | Tabel `stores` tidak ditemukan | Jalankan migrasi SQL melalui Supabase Dashboard → SQL Editor, pastikan proses berhasil, lalu coba masuk kembali. |
 | Undangan gagal atau terjadi masalah CORS | Deploy Edge Functions yang diperlukan dan pastikan secret `APP_URL` sama dengan origin aplikasi. |
+| Smart Kasbon tidak dapat dimuat | Terapkan migrasi `202610240001_smart_kasbon.sql`, deploy Edge Function `smart-kasbon`, pastikan akun masuk dan koneksi tersedia. |
+| Reset kata sandi tidak diproses | Terapkan migration keamanan akun, atur `RESET_RATE_LIMIT_SECRET`, deploy ulang `reset-password`, tunggu jendela pembatasan satu jam bila batas percobaan tercapai. |
 | Perubahan kode belum terlihat | Perbarui cache service worker dengan menaikkan nilai `VERSI` di `sw.js`, atau hapus data situs melalui DevTools → Application. |
 | Data tidak tersedia | Pulihkan dari berkas cadangan melalui Pengaturan → Pulihkan cadangan. |
 | Port 8080 sedang digunakan | Jalankan server pada port lain, misalnya `8090`, lalu sesuaikan URL yang digunakan. |

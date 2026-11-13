@@ -42,6 +42,71 @@ export function summarize({ sales, expenses, withdrawals }, from, to) {
   return { transaksi: ss.length, omzet, hpp, labaKotor, pengeluaran, labaBersih: labaKotor - pengeluaran, prive };
 }
 
+export async function pseudonymousUuid(kind, id, storeId) {
+  if (!storeId) throw new Error('Toko aktif tidak ditemukan.');
+  const digest = new Uint8Array(await crypto.subtle.digest(
+    'SHA-256',
+    new TextEncoder().encode(`warungpintar:smart-kasbon:${storeId}:${kind}:${id}`),
+  ));
+  const hex = [...digest].slice(0, 16).map((byte) => byte.toString(16).padStart(2, '0')).join('');
+  const version = ((parseInt(hex[12], 16) & 0x0f) | 0x50).toString(16);
+  const variant = ((parseInt(hex[16], 16) & 0x03) | 0x08).toString(16);
+  const value = hex.slice(0, 12) + version + hex.slice(13, 16) + variant + hex.slice(17);
+  return `${value.slice(0, 8)}-${value.slice(8, 12)}-${value.slice(12, 16)}-${value.slice(16, 20)}-${value.slice(20, 32)}`;
+}
+
+export function validatedSmartKasbonTimestamp(value, now = Date.now()) {
+  const date = new Date(String(value ?? ''));
+  if (!Number.isFinite(date.getTime())) throw new Error('Timestamp tidak valid.');
+  if (date.getTime() > now + 5 * 60 * 1000) throw new Error('Timestamp tidak boleh berada di masa depan.');
+  return date.toISOString();
+}
+
+export function smartKasbonFinancialSnapshot({ sales = [], expenses = [], withdrawals = [], purchases = [], payments = [] }, now = new Date()) {
+  const end = endOfDay(now);
+  const currentStart = startOfDay(addDays(now, -29));
+  const previousEnd = new Date(currentStart.getTime() - 1);
+  const previousStart = startOfDay(addDays(now, -59));
+  const weekStart = startOfDay(addDays(now, -6));
+  const salesIn = (from, to) => sales.filter((sale) => saleCountsAsRevenue(sale) && inRange(sale.waktu, from, to));
+  const summarizePeriod = (from, to) => {
+    const periodSales = salesIn(from, to);
+    const revenue = sum(periodSales.map(saleTotal));
+    const hpp = sum(periodSales.map(saleCost));
+    const operatingExpenses = sum(expenses.filter((item) => inRange(item.waktu, from, to)).map((item) => item.jumlah));
+    const cashSales = sum(periodSales.filter((sale) => sale.metode !== 'kasbon').map(saleTotal));
+    const collections = sum(payments.filter((payment) => inRange(payment.waktu, from, to)).map((payment) => payment.jumlah));
+    const stockPurchases = sum(purchases.filter((purchase) => inRange(purchase.waktu, from, to)).map((purchase) => purchase.total));
+    const withdrawalsTotal = sum(withdrawals.filter((item) => inRange(item.waktu, from, to)).map((item) => item.jumlah));
+    const cashOut = stockPurchases + operatingExpenses + withdrawalsTotal;
+    return {
+      revenue, hpp, grossProfit: revenue - hpp, operatingExpenses,
+      netProfit: revenue - hpp - operatingExpenses,
+      cashIn: cashSales + collections, cashOut, cashFlow: cashSales + collections - cashOut,
+      transactions: periodSales.length,
+    };
+  };
+  const current = summarizePeriod(currentStart, end);
+  const previous = summarizePeriod(previousStart, previousEnd);
+  const week = summarizePeriod(weekStart, end);
+
+  return {
+    generated_at: new Date(now).toISOString(),
+    has_sales_30: current.transactions > 0,
+    revenue_7: week.revenue,
+    revenue_30: current.revenue,
+    revenue_previous_30: previous.revenue,
+    hpp_30: current.hpp,
+    gross_profit_30: current.grossProfit,
+    net_profit_30: current.netProfit,
+    net_profit_previous_30: previous.netProfit,
+    operating_expenses_30: current.operatingExpenses,
+    cash_in_30: current.cashIn,
+    cash_out_30: current.cashOut,
+    cash_flow_30: current.cashFlow,
+  };
+}
+
 export function dailySeries(sales, from, to) {
   const map = new Map();
   for (let d = startOfDay(from); d <= to; d = addDays(d, 1)) map.set(ymd(d), { date: ymd(d), omzet: 0, laba: 0 });

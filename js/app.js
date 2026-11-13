@@ -6,11 +6,19 @@ import * as supabase from './supabase.js';
 import * as cloud from './cloud-sync.js';
 import { bindRupiahInput, formatRupiahInput, parseRupiahInput } from './currency.js';
 import { receiptJpeg, receiptPdf, renderReceiptCanvas } from './receipt.js';
+import { ENVIRONMENT } from './config.js';
 
 /* ============ Utilitas ============ */
 const $ = (s, r = document) => r.querySelector(s);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-const uid = () => (crypto.randomUUID ? crypto.randomUUID() : Date.now().toString(36) + Math.random().toString(36).slice(2));
+const uid = () => {
+  if (crypto.randomUUID) return crypto.randomUUID();
+  const bytes = crypto.getRandomValues(new Uint8Array(16));
+  bytes[6] = (bytes[6] & 0x0f) | 0x40;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  const hex = [...bytes].map((byte) => byte.toString(16).padStart(2, '0')).join('');
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+};
 const rp = L.rupiah;
 const fmtDate = (d) => new Date(d).toLocaleDateString('id-ID', { day: 'numeric', month: 'short', year: 'numeric' });
 const fmtTime = (d) => new Date(d).toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' });
@@ -25,6 +33,7 @@ const S = {
   cfg: {}, role: 'owner', account: null, authMode: 'login', authFlow: null, authMessage: '', authEmail: '',
   cart: [], q: '', metode: 'tunai', terima: '', custId: '', jt: '', checkoutInProgress: false,
   processingDebtIds: new Set(),
+  smartKasbon: null, smartKasbonCustomerNames: {}, smartKasbonLoading: false, smartKasbonMutationInProgress: false, smartKasbonError: '',
   qrisPreview: '', qrisFile: null, qrisStorageError: '',
   receipt: null,
   recentSalesLimit: 20,
@@ -68,6 +77,214 @@ async function load() {
   S.role = S.account?.role || 'owner';
 }
 const setCfg = (key, value) => { S.cfg[key] = value; return db.put('settings', { key, value }); };
+
+let smartKasbonLoadPromise = null;
+let smartKasbonLoadContextKey = null;
+let smartKasbonLastLoad = 0;
+let smartKasbonContextKey = null;
+function assertSmartKasbonContext(expected) {
+  const current = cloud.currentContext();
+  if (!expected || !current || current.storeId !== expected.storeId || current.userId !== expected.userId) {
+    throw new Error('Akun atau toko berubah. Ulangi tindakan Smart Kasbon dari akun aktif.');
+  }
+}
+
+async function smartKasbonBootstrapData(storeId) {
+  const loans = await Promise.all(S.debts.map(async (debt) => ({
+    id: await L.pseudonymousUuid('loan', debt.id, storeId),
+    customer_id: await L.pseudonymousUuid('customer', debt.customerId || `unknown:${debt.id}`, storeId),
+    amount: debt.jumlah,
+    due_date: L.ymd(debt.jatuhTempo),
+    ...((debt.createdAt || S.sales.find((sale) => sale.id === debt.saleId)?.waktu)
+      ? { created_at: debt.createdAt || S.sales.find((sale) => sale.id === debt.saleId).waktu }
+      : {}),
+  })));
+  const debtIds = new Set(S.debts.map((debt) => debt.id));
+  const payments = await Promise.all(S.payments.map(async (payment) => {
+    if (!debtIds.has(payment.debtId)) throw new Error('Riwayat pembayaran kasbon tidak memiliki kasbon terkait.');
+    return {
+      id: await L.pseudonymousUuid('payment', payment.id, storeId),
+      loan_id: await L.pseudonymousUuid('loan', payment.debtId, storeId),
+      amount: payment.jumlah,
+      paid_at: new Date(payment.waktu).toISOString(),
+    };
+  }));
+  payments.sort((left, right) => left.paid_at.localeCompare(right.paid_at));
+  return { loans, payments };
+}
+
+async function prepareSmartKasbonBackend(expected) {
+  assertSmartKasbonContext(expected);
+  if (!navigator.onLine) throw new Error('Smart Kasbon memerlukan koneksi internet.');
+  if (expected.role !== 'owner') return;
+  if (S.cfg.smartKasbonResetPending) {
+    assertSmartKasbonContext(expected);
+    await cloud.smartKasbon('clear_history', { reset_policy: true });
+    assertSmartKasbonContext(expected);
+    await setCfg('smartKasbonResetPending', false);
+    await setCfg('smartKasbonClearPending', false);
+    await setCfg('smartKasbonBootstrapDone', false);
+  } else if (S.cfg.smartKasbonClearPending) {
+    assertSmartKasbonContext(expected);
+    await cloud.smartKasbon('clear_history');
+    assertSmartKasbonContext(expected);
+    await setCfg('smartKasbonClearPending', false);
+    await setCfg('smartKasbonBootstrapDone', false);
+  }
+  if (!S.cfg.smartKasbonBootstrapDone) {
+    const history = await smartKasbonBootstrapData(expected.storeId);
+    const batches = [];
+    for (let index = 0; index < history.loans.length; index += 500) {
+      batches.push({ loans: history.loans.slice(index, index + 500), payments: [] });
+    }
+    for (let index = 0; index < history.payments.length; index += 2000) {
+      batches.push({ loans: [], payments: history.payments.slice(index, index + 2000) });
+    }
+    if (!batches.length) batches.push({ loans: [], payments: [] });
+    for (let index = 0; index < batches.length; index++) {
+      assertSmartKasbonContext(expected);
+      await cloud.smartKasbon('bootstrap', {
+        snapshot: { ...batches[index], finalize: index === batches.length - 1 },
+      });
+    }
+    assertSmartKasbonContext(expected);
+    await setCfg('smartKasbonBootstrapDone', true);
+  }
+  assertSmartKasbonContext(expected);
+  await cloud.smartKasbon('sync_finance', {
+    financial_snapshot: L.smartKasbonFinancialSnapshot(S),
+  });
+}
+
+async function fetchSmartKasbon(force = false) {
+  const expected = cloud.currentContext();
+  const storeId = expected?.storeId;
+  const contextKey = expected ? `${expected.userId}:${expected.storeId}` : null;
+  if (contextKey !== smartKasbonContextKey) {
+    smartKasbonContextKey = contextKey;
+    smartKasbonLastLoad = 0;
+    S.smartKasbon = null;
+    S.smartKasbonCustomerNames = {};
+  }
+  if (smartKasbonLoadPromise && smartKasbonLoadContextKey === contextKey) return smartKasbonLoadPromise;
+  if (!force && Date.now() - smartKasbonLastLoad < 60000) return;
+  const loadPromise = (async () => {
+    await Promise.resolve();
+    smartKasbonLastLoad = Date.now();
+    S.smartKasbonLoading = true;
+    S.smartKasbonError = '';
+    try {
+      if (!expected || !navigator.onLine) throw new Error('Dashboard Smart Kasbon memerlukan koneksi internet.');
+      await prepareSmartKasbonBackend(expected);
+      assertSmartKasbonContext(expected);
+      const dashboard = await cloud.smartKasbon('dashboard');
+      assertSmartKasbonContext(expected);
+      S.smartKasbon = dashboard;
+      const customerNames = await Promise.all(S.customers.map(async (customer) => [
+        await L.pseudonymousUuid('customer', customer.id, storeId), customer.nama,
+      ]));
+      assertSmartKasbonContext(expected);
+      S.smartKasbonCustomerNames = Object.fromEntries(customerNames);
+    } catch (error) {
+      const current = cloud.currentContext();
+      if (current?.userId === expected?.userId && current.storeId === storeId) {
+        S.smartKasbonError = error.message || 'Gagal memuat Smart Kasbon.';
+      }
+    } finally {
+      const current = cloud.currentContext();
+      if (current?.userId === expected?.userId && current.storeId === storeId) {
+        S.smartKasbonLoading = false;
+        if (location.hash.replace(/^#\/?/, '') === 'kasbon' && S.account) render();
+      }
+      if (smartKasbonLoadPromise === loadPromise) {
+        smartKasbonLoadPromise = null;
+        smartKasbonLoadContextKey = null;
+      }
+    }
+  })();
+  smartKasbonLoadPromise = loadPromise;
+  smartKasbonLoadContextKey = contextKey;
+  return smartKasbonLoadPromise;
+}
+
+function mKasbon() {
+  if (!S.smartKasbonLoading && Date.now() - smartKasbonLastLoad >= 60000) void fetchSmartKasbon();
+}
+
+async function authorizeSmartKasbonLoan(debt, expected) {
+  await prepareSmartKasbonBackend(expected);
+  assertSmartKasbonContext(expected);
+  const loanId = await L.pseudonymousUuid('loan', debt.id, expected.storeId);
+  const customerId = await L.pseudonymousUuid('customer', debt.customerId, expected.storeId);
+  assertSmartKasbonContext(expected);
+  const payload = {
+    loan: {
+      id: loanId,
+      customer_id: customerId,
+      amount: debt.jumlah,
+      due_date: L.ymd(debt.jatuhTempo),
+    },
+  };
+  const decision = await smartKasbonMutationWithRetry(
+    'issue', payload, 'void_loan', { loan_id: loanId }, expected,
+  );
+  if (!decision?.approved) {
+    const reasons = Array.isArray(decision?.reasons) ? decision.reasons.join(' ') : '';
+    throw new Error(reasons || 'Kasbon ditolak oleh kebijakan Smart Kasbon.');
+  }
+  return loanId;
+}
+
+async function smartKasbonMutationWithRetry(action, payload, undoAction, undoPayload, expected) {
+  const send = () => {
+    assertSmartKasbonContext(expected);
+    return cloud.smartKasbon(action, payload);
+  };
+  try {
+    const result = await send();
+    assertSmartKasbonContext(expected);
+    return result;
+  } catch (error) {
+    if (!/tidak dapat terhubung ke server|network|failed to fetch/i.test(error.message || '')) throw error;
+    try {
+      const result = await send();
+      assertSmartKasbonContext(expected);
+      return result;
+    } catch (retryError) {
+      try {
+        assertSmartKasbonContext(expected);
+        await cloud.smartKasbon(undoAction, undoPayload);
+      } catch (compensationError) {
+        throw new Error(`Status ${action === 'issue' ? 'kasbon' : 'pembayaran'} belum dapat dipastikan dan pembatalan otomatis gagal. Jangan ulangi transaksi sebelum memeriksa dashboard Smart Kasbon. Detail: ${compensationError.message}`);
+      }
+      throw new Error(`Permintaan ${action === 'issue' ? 'kasbon' : 'pembayaran'} gagal dan perubahan server yang mungkin sudah tersimpan telah dibatalkan. ${retryError.message}`);
+    }
+  }
+}
+
+async function saveLocalWithLoanCompensation(debt, saveLocal) {
+  if (S.smartKasbonMutationInProgress || S.processingDebtIds.size) {
+    throw new Error('Transaksi Smart Kasbon lain sedang diproses.');
+  }
+  const expected = cloud.currentContext();
+  S.smartKasbonMutationInProgress = true;
+  try {
+    const loanId = await authorizeSmartKasbonLoan(debt, expected);
+    try {
+      await saveLocal();
+    } catch (error) {
+      try {
+        assertSmartKasbonContext(expected);
+        await cloud.smartKasbon('void_loan', { loan_id: loanId });
+      } catch (compensationError) {
+        throw new Error(`Kasbon tercatat di server, tetapi penyimpanan lokal gagal dan pembatalan otomatis juga gagal. Hubungi pemilik toko sebelum mencoba ulang. Detail: ${compensationError.message}`);
+      }
+      throw error;
+    }
+  } finally {
+    S.smartKasbonMutationInProgress = false;
+  }
+}
 async function setCfgMany(values) {
   Object.assign(S.cfg, values);
   await db.atomic(['settings'], (store) => {
@@ -93,6 +310,7 @@ function renderAuth(message = S.authMessage) {
     <form id="auth-form">
       ${!invited && !reset ? `<label class="field"><span>Email</span><input name="email" type="email" value="${esc(S.authEmail)}" required autocomplete="email"></label>` : `<label class="field"><span>Email akun</span><input name="email" type="email" value="${esc(S.authFlow?.email || '')}" readonly></label>`}
       ${S.authMode === 'register' && !invited && !reset ? '<label class="field"><span>Nama toko</span><input name="storeName" required maxlength="120" autocomplete="organization"></label>' : ''}
+      ${S.authMode === 'register' && !invited && !reset ? '<label class="field"><span>Kode undangan pendaftaran</span><input name="inviteCode" required minlength="64" maxlength="64" pattern="[0-9A-Fa-f]{64}" autocomplete="off" spellcheck="false"><small>Minta kode satu kali dari administrator WarungPintar.</small></label>' : ''}
       <label class="field"><span>${invited || reset ? 'Kata sandi baru' : 'Kata sandi'}</span><input name="password" type="password" required minlength="${S.authMode === 'register' || invited || reset ? '8' : '6'}" autocomplete="${invited || reset ? 'new-password' : 'current-password'}"><small>${S.authMode === 'register' || invited || reset ? 'Gunakan kata sandi baru minimal 8 karakter.' : 'Masukkan kata sandi akun Anda.'}</small></label>
       ${(S.authMode === 'register' || invited || reset) ? '<label class="field"><span>Ulangi kata sandi</span><input name="confirmPassword" type="password" required minlength="8" autocomplete="new-password"></label>' : ''}
       ${recovery}
@@ -214,7 +432,12 @@ async function submitAuth(form) {
       return await completeLogin(password, recovery);
     }
     if (S.authMode === 'register') {
-      const result = await supabase.register(email, password, String(values.storeName || '').trim());
+      const result = await supabase.register(
+        email,
+        password,
+        String(values.storeName || '').trim(),
+        String(values.inviteCode || '').trim(),
+      );
       if (!result?.access_token) {
         S.authMode = 'login';
         return renderAuth('Akun berhasil dibuat, tetapi sesi belum terbentuk. Pastikan Edge Function register-owner telah di-deploy ke proyek Supabase.');
@@ -248,10 +471,10 @@ async function beginPasswordReset() {
   if (!value) return;
   if (value.password !== value.confirmPassword) throw new Error('Kata sandi baru belum sama.');
   await supabase.resetPassword(value.email.trim().toLowerCase(), value.recovery.trim(), value.password);
-  await supabase.login(value.email.trim().toLowerCase(), value.password);
+  S.authMode = 'login';
   S.authEmail = value.email.trim().toLowerCase();
-  await completeLogin(value.password, value.recovery.trim());
-  toast('Kata sandi berhasil direset.');
+  renderAuth('Jika email dan kunci pemulihan cocok, kata sandi telah diperbarui. Silakan masuk dengan kata sandi baru; bila gagal, periksa kembali email dan kunci pemulihan.');
+  toast('Jika email dan kunci pemulihan cocok, permintaan reset telah diproses.');
 }
 
 function toast(msg, type = 'ok') {
@@ -353,7 +576,7 @@ const ROUTES = {
   produk: { title: 'Produk dan Stok', render: vProduk, mount: mProduk },
   belanja: { title: 'Belanja Barang', render: vBelanja },
   pengeluaran: { title: 'Pengeluaran', render: vPengeluaran },
-  kasbon: { title: 'Kasbon', render: vKasbon },
+  kasbon: { title: 'Kasbon', render: vKasbon, mount: mKasbon },
   laporan: { title: 'Laporan', render: vLaporan },
   zakat: { title: 'Zakat Usaha', render: vZakat },
   pengaturan: { title: 'Pengaturan', render: vPengaturan },
@@ -565,12 +788,15 @@ async function checkout() {
       sale.customerId = S.custId;
       debt = { id: uid(), customerId: S.custId, saleId: sale.id, jumlah: total, jatuhTempo: L.dateToISO(S.jt), catatan: '' };
     }
-    await db.atomic(['sales', 'products', 'debts'], (st) => {
+    const saveLocal = () => db.atomic(['sales', 'products', 'debts'], (st) => {
       st('sales').put(sale);
       if (debt) st('debts').put(debt);
       items.forEach((i) => db.adjustStock(st, i.productId, -i.qty));
     });
+    if (debt) await saveLocalWithLoanCompensation(debt, saveLocal);
+    else await saveLocal();
     S.cart = []; S.terima = '';
+    if (debt) smartKasbonLastLoad = 0;
     await load(); renderPlist(); renderCart();
     showReceipt(sale);
   } finally {
@@ -973,10 +1199,66 @@ function vKasbon() {
       <span class="right"><b>${rp(sisa)}</b><small>dari total ${rp(d.jumlah)}</small><span class="acts">${sisa > 0 ? `<button class="btn small" data-act="paydebt" data-id="${esc(d.id)}">Catat pembayaran</button><a class="btn small ghost" target="_blank" rel="noopener" href="${L.waLink(c.wa, L.reminderText(c.nama, sisa, S.cfg.toko, d.jatuhTempo))}">Kirim pengingat</a>` : '<span class="chip ok">Lunas</span>'}</span></span></li>`;
   };
   return `<section class="grid2"><div class="stat"><span>Total piutang</span><b>${rp(L.totalReceivable(S.debts, S.payments))}</b></div><div class="stat"><span>Pelanggan</span><b>${S.customers.length}</b></div></section>
+  ${smartKasbonPanel()}
   <div class="row"><button class="btn primary" data-act="newcust2">Tambah pelanggan</button>${OWNER() ? '<button class="btn" data-act="manualdebt">Catat kasbon manual</button>' : ''}</div>
   <h2>Belum lunas</h2><ul class="rows tall">${open.length ? open.map(row).join('') : '<li class="muted">Tidak ada kasbon yang belum lunas.</li>'}</ul>
   <button class="btn ghost small" data-act="togglelunas">${S.showLunas ? 'Sembunyikan' : 'Tampilkan'} kasbon lunas (${closed.length})</button>
   ${S.showLunas ? `<ul class="rows tall">${closed.map(row).join('')}</ul>` : ''}`;
+}
+
+function smartKasbonPanel() {
+  const dashboard = S.smartKasbon;
+  const setupButton = OWNER()
+    ? `<button class="btn primary small" data-act="smart-kasbon-setup">${dashboard?.policy?.configured ? 'Ubah kebijakan' : 'Atur Smart Kasbon'}</button>`
+    : '';
+  if (S.smartKasbonLoading) return '<section class="card"><h2>Smart Kasbon</h2><p class="muted">Memuat analisis dan batas kasbon dari server…</p></section>';
+  if (S.smartKasbonError) return `<section class="card"><h2>Smart Kasbon</h2><p class="err">${esc(S.smartKasbonError)}</p><button class="btn small" data-act="smart-kasbon-refresh">Coba lagi</button></section>`;
+  if (!dashboard) return '<section class="card"><h2>Smart Kasbon</h2><p class="muted">Dashboard belum dimuat.</p><button class="btn small" data-act="smart-kasbon-refresh">Muat dashboard</button></section>';
+  const policy = dashboard.policy;
+  if (!policy?.configured) {
+    return `<section class="card"><h2>Smart Kasbon</h2><p>${OWNER()
+      ? 'Masukkan kas dan modal kerja sebagai input kebijakan. Server menghitung batas dari input ini, tetapi tidak memverifikasi snapshot vault secara independen.'
+      : 'Pemilik toko perlu mengatur kondisi keuangan dan kebijakan kasbon terlebih dahulu.'}</p>
+      <p class="muted small">Kasbon baru memerlukan koneksi internet. Kas dan modal kerja tidak dilacak otomatis oleh aplikasi.</p>${setupButton}</section>`;
+  }
+  const summary = dashboard.summary || {};
+  const risks = dashboard.risks || [];
+  const health = dashboard.health || risks[0] || {};
+  const healthNames = {
+    cold_start: 'Data belum cukup (cold start)', kritis: 'Kritis', menurun: 'Menurun',
+    stagnan: 'Stagnan', sangat_sehat: 'Sangat sehat', sehat: 'Sehat', stabil: 'Stabil',
+  };
+  const riskCounts = risks.reduce((counts, item) => {
+    const name = item.risk || 'sedang';
+    counts[name] = (counts[name] || 0) + 1;
+    return counts;
+  }, {});
+  const riskText = ['tinggi', 'sedang', 'rendah']
+    .filter((name) => riskCounts[name])
+    .map((name) => `${riskCounts[name]} ${name}`)
+    .join(' · ') || 'Belum ada riwayat pelanggan untuk dinilai';
+  const riskRows = risks.slice(0, 10).map((item) => {
+    const name = S.smartKasbonCustomerNames[item.customer_id] || 'Pelanggan pseudonim';
+    const remaining = item.current_customer_balance || 0;
+    return `<li><span>${esc(name)}<small>Risiko ${esc(item.risk || 'sedang')} · saldo ${rp(remaining)} · limit ${rp(item.limits?.per_customer || 0)}</small></span><b>Skor ${item.risk_score ?? 60}/100</b></li>`;
+  }).join('');
+  const decisions = (dashboard.decisions || []).slice(0, 5);
+  return `<section class="card">
+    <div class="row wrap"><h2>Smart Kasbon</h2>${setupButton}<button class="btn ghost small" data-act="smart-kasbon-refresh">Perbarui</button></div>
+    <p>Kondisi toko: <b>${esc(healthNames[health.health] || 'Belum dinilai')}</b></p>
+    <div class="grid2">
+      <div class="stat"><span>Piutang aktif server</span><b>${rp(summary.total_receivable || 0)}</b></div>
+      <div class="stat"><span>Piutang terlambat</span><b class="${summary.overdue_receivable ? 'neg' : ''}">${rp(summary.overdue_receivable || 0)}</b></div>
+    </div>
+    <p class="small">Pelanggan aktif: ${summary.active_customers || 0} / ${policy.max_active_customers}. Kasbon aktif: ${summary.loan_count || 0}.</p>
+    <p class="small">Batas piutang efektif saat ini: ${rp(health.limits?.total_receivable || 0)} · batas per pelanggan paling tinggi ${rp(policy.max_per_customer)}.</p>
+    <p class="small">Ringkasan keuangan dari vault browser: ${health.metrics?.snapshot_fresh ? 'terbaru' : 'perlu diperbarui pemilik'}.</p>
+    <p class="muted small">Batas ini adalah aturan internal, bukan jaminan kesehatan usaha. Snapshot dan kas/modal kerja berasal dari browser/pemilik dan tidak dapat diverifikasi server terhadap vault terenkripsi.</p>
+    <p class="small">Risiko riwayat pelanggan: ${esc(riskText)}.</p>
+    ${riskRows ? `<details><summary>Skor risiko pelanggan (${risks.length})</summary><ul class="rows">${riskRows}</ul>${risks.length > 10 ? `<p class="muted small">Menampilkan 10 dari ${risks.length} pelanggan.</p>` : ''}</details>` : ''}
+    <p class="muted small">Keputusan limit menggunakan aturan transparan; ML belum digunakan. Status model: ${esc(dashboard.model?.state || 'cold_start')}.</p>
+    ${decisions.length ? `<details><summary>Keputusan terbaru (${decisions.length})</summary><ul class="plain small">${decisions.map((item) => `<li>${esc(item.action)} · ${item.approved === null ? 'dicatat' : item.approved ? 'disetujui' : 'ditolak'} · ${fmtDate(item.created_at)}</li>`).join('')}</ul></details>` : ''}
+  </section>`;
 }
 async function newCustomer() {
   const v = await formModal({
@@ -998,27 +1280,55 @@ async function payDebt(id) {
     const sisa = L.debtRemaining(d, S.payments);
     if (sisa <= 0) return toast('Kasbon ini telah lunas.', 'err');
     const v = await formModal({
-      title: 'Catat pembayaran kasbon', note: `Sisa kasbon: ${rp(sisa)}`,
-      fields: [{ name: 'jumlah', label: 'Jumlah dibayar (Rp)', type: 'currency', min: 1, required: true, value: sisa }, { name: 'tanggal', label: 'Tanggal', type: 'date', value: L.ymd(new Date()), required: true }],
+      title: 'Catat pembayaran kasbon',
+      note: `Sisa kasbon: ${rp(sisa)}. Waktu pencatatan ditetapkan oleh server.`,
+      fields: [{ name: 'jumlah', label: 'Jumlah dibayar (Rp)', type: 'currency', min: 1, required: true, value: sisa }],
       validate: (x) => (x.jumlah > sisa ? `Melebihi sisa kasbon (${rp(sisa)}).` : ''),
     });
     if (!v) return;
-    const payment = { id: uid(), debtId: id, jumlah: v.jumlah, waktu: L.dateToISO(v.tanggal) };
+    const payment = { id: uid(), debtId: id, jumlah: v.jumlah };
+    const expected = cloud.currentContext();
+    const paymentId = await L.pseudonymousUuid('payment', payment.id, expected?.storeId);
+    const backendPayment = {
+      payment_id: paymentId,
+      loan_id: await L.pseudonymousUuid('loan', id, expected?.storeId),
+      amount: payment.jumlah,
+    };
     let paidOff = false;
-    await db.atomic(['debts', 'payments'], (store) => {
-      const debtRequest = store('debts').get(id);
-      debtRequest.onsuccess = () => {
-        const currentDebt = debtRequest.result;
-        if (!currentDebt) throw new Error('Kasbon tidak ditemukan saat menyimpan pembayaran.');
-        const paymentsRequest = store('payments').getAll();
-        paymentsRequest.onsuccess = () => {
-          const status = L.validateDebtPayment(currentDebt, paymentsRequest.result, v.jumlah);
-          store('payments').put(payment);
-          paidOff = status.isPaid;
+    try {
+      const result = await smartKasbonMutationWithRetry(
+        'payment', { payment: backendPayment }, 'void_payment',
+        { payment_id: paymentId }, expected,
+      );
+      if (!result?.paid_at || !Number.isFinite(new Date(result.paid_at).getTime())) {
+        throw new Error('Server tidak mengembalikan waktu pembayaran yang valid.');
+      }
+      payment.waktu = new Date(result.paid_at).toISOString();
+      await db.atomic(['debts', 'payments'], (store) => {
+        const debtRequest = store('debts').get(id);
+        debtRequest.onsuccess = () => {
+          const currentDebt = debtRequest.result;
+          if (!currentDebt) throw new Error('Kasbon tidak ditemukan saat menyimpan pembayaran.');
+          const paymentsRequest = store('payments').getAll();
+          paymentsRequest.onsuccess = () => {
+            const status = L.validateDebtPayment(currentDebt, paymentsRequest.result, v.jumlah);
+            store('payments').put(payment);
+            paidOff = status.isPaid;
+          };
         };
-      };
-    });
-    toast(paidOff ? 'Kasbon telah lunas.' : 'Pembayaran kasbon berhasil dicatat.'); await refresh();
+      });
+    } catch (error) {
+      try {
+        assertSmartKasbonContext(expected);
+        await cloud.smartKasbon('void_payment', { payment_id: paymentId });
+      } catch (compensationError) {
+        throw new Error(`Pembayaran tercatat di server, tetapi penyimpanan lokal gagal dan pembatalan otomatis juga gagal. Hubungi pemilik toko sebelum mencoba ulang. Detail: ${compensationError.message}`);
+      }
+      throw error;
+    }
+    toast(paidOff ? 'Kasbon telah lunas.' : 'Pembayaran kasbon berhasil dicatat.');
+    await refresh();
+    await fetchSmartKasbon(true);
   } finally {
     S.processingDebtIds.delete(id);
   }
@@ -1035,8 +1345,52 @@ async function manualDebt() {
     ],
   });
   if (!v) return;
-  await db.put('debts', { id: uid(), customerId: v.customerId, saleId: null, jumlah: v.jumlah, jatuhTempo: L.dateToISO(v.jt), catatan: v.catatan });
-  toast('Kasbon dicatat.'); await refresh();
+  const debt = { id: uid(), customerId: v.customerId, saleId: null, jumlah: v.jumlah, jatuhTempo: L.dateToISO(v.jt), catatan: v.catatan };
+  await saveLocalWithLoanCompensation(debt, () => db.put('debts', debt));
+  toast('Kasbon dicatat.'); await refresh(); await fetchSmartKasbon(true);
+}
+
+async function setupSmartKasbon() {
+  if (!OWNER()) return toast('Hanya pemilik yang dapat mengatur kebijakan Smart Kasbon.', 'err');
+  const policy = S.smartKasbon?.policy;
+  const v = await formModal({
+    title: policy?.configured ? 'Ubah kebijakan Smart Kasbon' : 'Atur Smart Kasbon',
+    note: 'Kas dan modal kerja tidak dilacak otomatis. Masukkan kondisi aktual toko. Batas kasbon akan dihitung di server dari angka ini dan ringkasan transaksi.',
+    fields: [
+      { name: 'cashAvailable', label: 'Kas tersedia saat ini (Rp)', type: 'currency', min: 0, required: true, value: policy?.cash_available ?? '' },
+      { name: 'workingCapital', label: 'Modal kerja sebelum kewajiban dan piutang (Rp)', type: 'currency', min: 0, required: true, value: policy?.working_capital ?? '' },
+      { name: 'liabilities', label: 'Kewajiban usaha (Rp)', type: 'currency', min: 0, required: true, value: policy?.liabilities ?? 0 },
+      { name: 'reserveCash', label: 'Cadangan kas minimum (Rp)', type: 'currency', min: 0, required: true, value: policy?.reserve_cash ?? 0 },
+      { name: 'maxPerCustomer', label: 'Batas nominal per pelanggan (Rp)', type: 'currency', min: 1, required: true, value: policy?.max_per_customer ?? 100000 },
+      { name: 'maxActiveCustomers', label: 'Maksimum pelanggan kasbon aktif', type: 'number', min: 1, required: true, value: policy?.max_active_customers ?? 2 },
+      { name: 'maxTotalReceivable', label: 'Batas total piutang kasbon (Rp)', type: 'currency', min: 1, required: true, value: policy?.max_total_receivable ?? 200000 },
+    ],
+    validate: (values) => values.reserveCash > values.cashAvailable
+      ? 'Cadangan kas tidak boleh melebihi kas tersedia.'
+      : '',
+  });
+  if (!v) return;
+  const confirmed = await confirmModal(
+    'Simpan kebijakan Smart Kasbon?',
+    'Simpan kebijakan',
+    'Pastikan angka kas, modal kerja, kewajiban, dan cadangan sudah dikonfirmasi pemilik. Aplikasi tidak dapat memverifikasi saldo kas aktual.',
+  );
+  if (!confirmed) return;
+  const financialSnapshot = L.smartKasbonFinancialSnapshot(S);
+  if (S.smartKasbonMutationInProgress || S.processingDebtIds.size || S.checkoutInProgress) {
+    throw new Error('Transaksi Smart Kasbon lain sedang diproses.');
+  }
+  S.smartKasbonMutationInProgress = true;
+  try {
+    await cloud.smartKasbon('set_policy', {
+      policy: v,
+      financial_snapshot: financialSnapshot,
+    });
+    toast('Kebijakan Smart Kasbon disimpan.');
+    await fetchSmartKasbon(true);
+  } finally {
+    S.smartKasbonMutationInProgress = false;
+  }
 }
 
 /* ============ Laporan ============ */
@@ -1290,8 +1644,8 @@ function vPengaturan() {
     <form id="invite-form" class="row wrap"><label class="field"><span>Email asisten</span><input name="email" type="email" required autocomplete="email"></label><button class="btn primary" type="submit">Kirim undangan</button></form><button class="btn" data-act="manage-assistants">Kelola asisten</button></section>
     <section class="card"><h2>Kunci pemulihan</h2><p class="muted small">Buat kunci pemulihan baru jika kunci sebelumnya hilang. Kunci lama tidak berlaku setelah diganti. Simpan kunci baru sebelum membagikannya kepada asisten.</p><button class="btn" data-act="rotate-recovery">Buat kunci pemulihan baru</button></section>` : ''}
   <section class="card"><h2>Sinkronisasi</h2><p class="muted small">Perubahan dienkripsi sebelum dikirim. Saat offline, data tetap tersimpan dalam keadaan terenkripsi di perangkat dan akan disinkronkan saat koneksi tersedia.</p><button class="btn" data-act="sync">Sinkronkan sekarang</button></section>
-  <section class="card"><h2>Cadangan terenkripsi</h2><p class="muted small">Berkas cadangan tidak memuat data dalam bentuk terbuka. Gunakan kata sandi akun untuk mengenkripsi dan memulihkan cadangan.</p>
-    <div class="row wrap"><button class="btn primary" data-act="backup">Unduh cadangan</button><label class="btn">Pulihkan cadangan<input id="restore" type="file" accept="application/json,.json" hidden></label></div></section>
+  ${OWNER() ? `<section class="card"><h2>Cadangan terenkripsi</h2><p class="muted small">Berkas cadangan tidak memuat data dalam bentuk terbuka. Gunakan kata sandi akun untuk mengenkripsi dan memulihkan cadangan.</p>
+    <div class="row wrap"><button class="btn primary" data-act="backup">Unduh cadangan</button><label class="btn">Pulihkan cadangan<input id="restore" type="file" accept="application/json,.json" hidden></label></div></section>` : ''}
   ${OWNER() ? `<section class="card"><h2>Penghapusan data</h2><div class="row wrap"><button class="btn danger" data-act="reset">Hapus semua data toko</button></div></section>` : ''}
   <section class="card"><button class="btn danger" data-act="logout">Keluar dari akun</button></section>
   <p class="muted small center">WarungPintar 2.0 · Data dienkripsi dengan AES-GCM dan kunci akun</p>`;
@@ -1450,6 +1804,8 @@ const A = {
   delmoney: async (d) => { if (await confirmModal('Hapus catatan ini?', 'Hapus')) { await db.del(d.kind, d.id); await refresh(); } },
   paydebt: (d) => payDebt(d.id),
   manualdebt: manualDebt,
+  'smart-kasbon-setup': setupSmartKasbon,
+  'smart-kasbon-refresh': () => fetchSmartKasbon(true),
   togglelunas: () => { S.showLunas = !S.showLunas; render(); },
   csv: exportCSV,
   xlsx: exportXlsx,
@@ -1519,18 +1875,64 @@ const A = {
   },
   reset: async () => {
     if (!(await confirmModal('Hapus semua data toko?', 'Hapus semua', 'Produk, transaksi, kasbon, dan pengaturan toko akan dihapus dari server dan perangkat.'))) return;
-    await db.wipe(); await setCfg('toko', S.account.storeName); S.cart = []; toast('Semua data dihapus.'); await refresh();
+    if (S.smartKasbonMutationInProgress || S.processingDebtIds.size || S.checkoutInProgress) {
+      throw new Error('Transaksi Smart Kasbon lain sedang diproses.');
+    }
+    S.smartKasbonMutationInProgress = true;
+    try {
+      await db.wipe();
+      await setCfg('toko', S.account.storeName);
+      await setCfg('smartKasbonResetPending', true);
+      await setCfg('smartKasbonClearPending', false);
+      await setCfg('smartKasbonBootstrapDone', false);
+      S.cart = [];
+      await refresh();
+      if (navigator.onLine) {
+        await fetchSmartKasbon(true);
+        if (S.cfg.smartKasbonResetPending) {
+          toast('Data lokal telah dihapus, tetapi reset Smart Kasbon server belum selesai. Buka halaman Kasbon saat koneksi tersedia untuk mencoba kembali.', 'err');
+        } else if (S.smartKasbonError) {
+          toast('Data lokal dan kebijakan Smart Kasbon telah direset, tetapi dashboard belum berhasil dimuat: ' + S.smartKasbonError, 'err');
+        } else {
+          toast('Semua data dihapus. Kebijakan Smart Kasbon perlu diatur kembali.');
+        }
+      } else {
+        toast('Data lokal dihapus. Kebijakan dan riwayat Smart Kasbon server akan direset saat koneksi tersedia.');
+      }
+    } finally {
+      S.smartKasbonMutationInProgress = false;
+    }
   },
   'clear-transactions': async () => {
     if (!(await confirmModal(
       'Hapus semua data transaksi?',
       'Hapus transaksi',
-      'Riwayat penjualan, belanja barang, pengeluaran, penarikan pribadi, kasbon, dan pembayarannya akan dihapus. Produk, pelanggan, pengaturan toko, serta jumlah stok saat ini tidak berubah. Tindakan ini tidak dapat dibatalkan.',
+      'Riwayat penjualan, belanja barang, pengeluaran, penarikan pribadi, kasbon, dan pembayarannya akan dihapus. Produk, pelanggan, pengaturan toko, serta jumlah stok saat ini tidak berubah. Catatan Smart Kasbon di server akan ditandai batal saat koneksi tersedia. Tindakan ini tidak dapat dibatalkan.',
     ))) return;
-    await db.clearTransactions();
-    S.cart = [];
-    await refresh();
-    toast('Semua data transaksi telah dihapus. Produk dan jumlah stok tetap dipertahankan.');
+    if (S.smartKasbonMutationInProgress || S.processingDebtIds.size || S.checkoutInProgress) {
+      throw new Error('Transaksi Smart Kasbon lain sedang diproses.');
+    }
+    S.smartKasbonMutationInProgress = true;
+    try {
+      await db.clearTransactions();
+      await setCfg('smartKasbonClearPending', true);
+      S.cart = [];
+      await refresh();
+      if (navigator.onLine) {
+        await fetchSmartKasbon(true);
+        if (S.cfg.smartKasbonClearPending) {
+          toast('Data lokal telah dihapus, tetapi riwayat Smart Kasbon di server belum dibersihkan. Buka halaman Kasbon saat koneksi tersedia untuk mencoba kembali.', 'err');
+        } else if (S.smartKasbonError) {
+          toast('Data transaksi dan riwayat Smart Kasbon telah dibersihkan, tetapi dashboard belum berhasil dimuat: ' + S.smartKasbonError, 'err');
+        } else {
+          toast('Semua data transaksi telah dihapus. Produk dan jumlah stok tetap dipertahankan.');
+        }
+      } else {
+        toast('Data lokal telah dihapus. Riwayat Smart Kasbon di server akan dibersihkan saat koneksi tersedia.');
+      }
+    } finally {
+      S.smartKasbonMutationInProgress = false;
+    }
   },
   'copy-recovery': async () => {
     await navigator.clipboard.writeText(S.recoveryCode);
@@ -1594,6 +1996,11 @@ document.addEventListener('change', (e) => {
   else if (t.id === 'rf') { S.rep.from = t.value || S.rep.from; render(); }
   else if (t.id === 'rt') { S.rep.to = t.value || S.rep.to; render(); }
   else if (t.id === 'restore' && t.files[0]) {
+    if (!OWNER()) {
+      t.value = '';
+      toast('Hanya pemilik yang dapat memulihkan cadangan toko.', 'err');
+      return;
+    }
     const file = t.files[0];
     let restoredLocally = false;
     withLoading(async () => {
@@ -1609,6 +2016,8 @@ document.addEventListener('change', (e) => {
       } else return;
       if (!(await confirmModal('Ganti data pada perangkat dan server?', 'Pulihkan', 'Data saat ini akan diganti dan perubahan akan disinkronkan ke server.'))) return;
       await db.importAll(data);
+      await setCfg('smartKasbonClearPending', true);
+      await setCfg('smartKasbonBootstrapDone', false);
       restoredLocally = true;
       await refresh();
       const result = await cloud.syncNow();
@@ -1654,7 +2063,17 @@ function netStatus() {
 addEventListener('online', netStatus); addEventListener('offline', netStatus);
 
 (async function init() {
+  if (ENVIRONMENT === 'staging') {
+    const badge = $('#environment');
+    badge.hidden = false;
+    badge.textContent = 'STAGING';
+    badge.title = 'Koneksi menggunakan project Supabase staging.';
+    badge.setAttribute('aria-label', 'Environment staging');
+  }
   netStatus();
+  if (S.checkoutInProgress || S.smartKasbonMutationInProgress || S.processingDebtIds.size) {
+    return toast('Tunggu sampai transaksi kasbon atau pembayaran selesai sebelum keluar.', 'err');
+  }
   try {
     if (navigator.storage?.persist) await navigator.storage.persist();
     const authState = await supabase.restoreSession();

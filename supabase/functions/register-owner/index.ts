@@ -1,6 +1,7 @@
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
 
 const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const INVITE_CODE_PATTERN = /^[0-9a-f]{64}$/i;
 
 Deno.serve(async (request) => {
   const configuredAppUrl = Deno.env.get('APP_URL');
@@ -46,8 +47,10 @@ Deno.serve(async (request) => {
     return Response.json({ error: 'Fungsi pendaftaran belum dikonfigurasi lengkap.' }, { status: 500, headers });
   }
 
-  let createdUserId: string | undefined;
   const admin = createClient(supabaseUrl, serviceRoleKey, { auth: { persistSession: false } });
+  let reservationId: string | null = null;
+  let createdUserId: string | null = null;
+  let inviteCompleted = false;
   try {
     const payload = await request.json();
     if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
@@ -57,42 +60,79 @@ Deno.serve(async (request) => {
     const email = String(payload.email ?? '').trim().toLowerCase();
     const password = String(payload.password ?? '');
     const storeName = String(payload.store_name ?? '').trim();
-    if (!EMAIL_PATTERN.test(email)) {
+    const inviteCode = String(payload.invite_code ?? '').trim().toLowerCase();
+    if (!EMAIL_PATTERN.test(email) || email.length > 254) {
       return Response.json({ error: 'Alamat email tidak valid.' }, { status: 400, headers });
     }
-    if (password.length < 8) {
-      return Response.json({ error: 'Password harus minimal 8 karakter.' }, { status: 400, headers });
+    if (password.length < 8 || password.length > 128) {
+      return Response.json({ error: 'Password harus terdiri dari 8 sampai 128 karakter.' }, { status: 400, headers });
     }
     if (storeName.length < 1 || storeName.length > 120) {
       return Response.json({ error: 'Nama toko harus terdiri dari 1 sampai 120 karakter.' }, { status: 400, headers });
     }
-
-    const { data: created, error: createError } = await admin.auth.admin.createUser({
-      email,
-      password,
-      email_confirm: true,
-      user_metadata: { store_name: storeName, warungpintar_empty_vault: true },
-    });
-    if (createError) {
-      return Response.json({ error: createError.message }, { status: 400, headers });
+    if (!INVITE_CODE_PATTERN.test(inviteCode)) {
+      return Response.json({ error: 'Kode undangan tidak valid atau sudah digunakan.' }, { status: 403, headers });
     }
-    createdUserId = created.user.id;
+
+    const { data: reservation, error: reserveError } = await admin.rpc(
+      'reserve_owner_registration_invite',
+      { p_token: inviteCode, p_email: email },
+    );
+    if (reserveError) throw reserveError;
+    if (typeof reservation !== 'string') {
+      return Response.json({ error: 'Kode undangan tidak valid atau sudah digunakan.' }, { status: 403, headers });
+    }
+    reservationId = reservation;
 
     const userClient = createClient(supabaseUrl, anonKey, { auth: { persistSession: false } });
-    const { data: signedIn, error: signInError } = await userClient.auth.signInWithPassword({ email, password });
-    if (signInError || !signedIn.session) {
-      throw signInError || new Error('Supabase tidak membuat sesi login setelah pendaftaran.');
+    const { data: signup, error: signupError } = await userClient.auth.signUp({
+      email,
+      password,
+      options: {
+        data: { store_name: storeName, warungpintar_empty_vault: true },
+      },
+    });
+    if (signupError) {
+      return Response.json({ error: 'Pendaftaran tidak berhasil. Periksa data dan kode undangan.' }, { status: 400, headers });
     }
 
-    return Response.json(signedIn.session, { headers });
+    if (!signup.session || !signup.user) {
+      if (signup.user?.id && (signup.user.identities?.length ?? 0) > 0) {
+        createdUserId = signup.user.id;
+      }
+      return Response.json(
+        { error: 'Pendaftaran belum dapat diselesaikan. Pastikan konfirmasi email Supabase dinonaktifkan.' },
+        { status: 503, headers },
+      );
+    }
+    createdUserId = signup.user.id;
+
+    const { data: completed, error: completeError } = await admin.rpc(
+      'complete_owner_registration_invite',
+      { p_reservation_id: reservationId, p_user_id: createdUserId },
+    );
+    if (completeError) throw completeError;
+    if (completed !== true) throw new Error('Reservasi kode undangan kedaluwarsa sebelum selesai.');
+    inviteCompleted = true;
+
+    return Response.json(signup.session, { headers });
   } catch (error) {
-    if (createdUserId) {
+    console.error(
+      'Pendaftaran pemilik gagal diproses:',
+      error instanceof Error ? error.message : 'Kesalahan tidak diketahui.',
+    );
+    return Response.json({ error: 'Pendaftaran belum dapat diproses. Coba kembali nanti.' }, { status: 503, headers });
+  } finally {
+    if (createdUserId && !inviteCompleted) {
       const { error: cleanupError } = await admin.auth.admin.deleteUser(createdUserId);
       if (cleanupError) console.error('Pembersihan akun pendaftaran gagal:', cleanupError.message);
     }
-    console.error('Pendaftaran pemilik gagal:', error);
-    return Response.json({
-      error: error instanceof Error ? error.message : 'Pendaftaran gagal.',
-    }, { status: 500, headers });
+    if (reservationId && !inviteCompleted) {
+      const { error: releaseError } = await admin.rpc(
+        'release_owner_registration_invite',
+        { p_reservation_id: reservationId },
+      );
+      if (releaseError) console.error('Pelepasan reservasi kode undangan gagal:', releaseError.message);
+    }
   }
 });

@@ -1,0 +1,4 @@
+/js/config.local.js
+/supabase/.env.local
+/dist-staging/
+/dist-staging-tmp/
