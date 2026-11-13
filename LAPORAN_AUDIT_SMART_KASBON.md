@@ -1468,12 +1468,14 @@ Addendum ini mencatat implementasi ML advisory dan perbaikan route Zakat setelah
 
 ### Frontend, Zakat, dan hambatan verifikasi live
 
-- Commit `f14e69c` sudah dipush ke branch `staging`. Git remote mengonfirmasi ref tersebut.
-- Build staging lokal valid, tetapi sesudah push asset website masih mengembalikan HTTP 200 dengan source yang belum memuat marker UI ML/Zakat terbaru. Dashboard Render meminta login, `render.yaml` tidak ada, dan tidak ada Render API environment variable; koneksi service/branch serta Auto-Deploy tidak bisa dibaca atau dipicu manual dari akses saat ini. Karena itu frontend terbaru **belum terverifikasi live**.
-- Browser staging hanya menampilkan halaman login bertanda `STAGING`. `.env.test.local` tidak tersedia; tidak ada sesi owner/assistant, sehingga Zakat dan Smart Kasbon tidak dapat diuji melalui alur browser terautentikasi.
+- Commit source `f14e69c` dan pembaruan laporan `3b69c58` telah dipush ke branch `staging`; `git ls-remote` mengonfirmasi remote menunjuk `3b69c58f0d739e41c286d123e52797f345f092f7`.
+- Setelah push, frontend staging terlayani dengan HTTP 200. Aset live `js/app.js` berukuran 144.530 byte dan SHA-256 byte mentahnya sama persis dengan file lokal yang dikomit (`abd02dd0dd612f0690667d26d76ec69571d0f772fd6157e8b39054f1ceb5b641`); marker UI ML dan Zakat juga ada.
+- Browser live menampilkan login berlabel `STAGING`; form owner menampilkan email, nama toko, kode undangan, dan password tanpa instruksi aktivasi/konfirmasi email. Form assistant meminta kode undangan dan password, juga tanpa instruksi konfirmasi. Form diperiksa tanpa mengirim pendaftaran atau menggunakan akun nyata.
+- Website telah menyajikan source terbaru setelah push, tetapi dashboard Render meminta login. Karena itu repository/service binding dan nilai konfigurasi Auto-Deploy tidak dapat dibaca secara independen; bukti asset live hanya memastikan hasil source terbaru tersedia, bukan nilai toggle Auto-Deploy.
+- `.env.test.local` tidak tersedia dan tidak ada sesi owner/assistant; Zakat dan Smart Kasbon belum dapat diuji melalui alur browser terautentikasi.
 - pgTAP tidak dijalankan pada tahap ini karena koneksi PostgreSQL ditolak dan extension belum dapat diverifikasi. Tes JS dan pemeriksaan privilege read-only bukan pengganti E2E/pgTAP.
 - Tidak ada email yang ditambahkan atau dikirim. Tidak ada operasi database destruktif, penghapusan data, atau akses ke project production.
 
 ### Status kesiapan terbaru
 
-**NOT READY / BELUM LAYAK untuk pengguna nyata.** Backend pipeline ML dan migration staging aktif, namun staging belum memiliki satu pun kasbon untuk training, tidak ada model/performa yang tervalidasi, frontend commit terbaru belum terlayani, migration CLI repair tetap terhalang password DB, dan E2E owner/assistant serta pgTAP belum dibuktikan. Smart Kasbon tetap memakai aturan SQL untuk seluruh keputusan sampai tersedia data nyata yang memadai, evaluasi independen yang memenuhi ambang, dan aktivasi advisory yang disetujui owner.
+**NOT READY / BELUM LAYAK untuk pengguna nyata.** Backend pipeline ML dan migration staging aktif, dan source frontend terbaru telah terverifikasi live. Namun staging belum memiliki satu pun kasbon untuk training sehingga tidak ada model/performa bisnis yang tervalidasi; migration CLI repair tetap terhalang password DB; dan E2E owner/assistant terautentikasi serta pgTAP belum dibuktikan. Smart Kasbon tetap memakai aturan SQL untuk seluruh keputusan sampai tersedia data nyata yang memadai, evaluasi independen yang memenuhi ambang, dan aktivasi advisory yang disetujui owner.
