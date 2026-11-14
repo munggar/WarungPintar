@@ -1566,6 +1566,7 @@ Confusion matrix holdout: **TP 78, FP 25, TN 72, FN 25**. Metrik dan kelas di at
 - Payment live: cicilan 50.000 menghasilkan sisa 150.000; replay payment ID yang sama menghasilkan `idempotent=true`; pembayaran 150.000 berikutnya menghasilkan `settled=true` dan sisa 0.
 - Login owner berhasil. Owner membuat invitation satu kali; pendaftaran/login assistant berhasil dengan role `assistant`. Assistant dapat membuka dashboard dan melihat metode `machine_learning`, tetapi aksi training owner-only ditolak HTTP **403**.
 - Isolasi lintas toko diuji terhadap ID toko staging lain yang memang ada: permintaan dashboard oleh owner demo dan assistant demo masing-masing ditolak HTTP **403**.
+- Query terlingkup menemukan **5 toko staging lain**, dengan total **0 loan / 0 payment / 0 model**. Seluruh fixture dan model hanya berada di toko demo khusus.
 - Browser Render live menampilkan badge STAGING dan form pendaftaran assistant. Layout diuji pada lebar 390, 768, dan 1280 px tanpa horizontal overflow. Ini adalah uji tampilan/auth form; bukan validasi seluruh halaman fitur aplikasi setelah login.
 - Tabel riwayat model hanya berisi satu model aktif, sehingga belum ada beberapa versi yang dapat dibandingkan. Dashboard menampilkan versi aktif beserta metrik aktual.
 
