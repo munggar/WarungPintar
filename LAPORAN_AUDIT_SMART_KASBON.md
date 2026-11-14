@@ -1520,3 +1520,72 @@ Addendum ini memperbarui status terbaru untuk permintaan hybrid. Implementasi ML
 ### Status implementasi
 
 **Hybrid Rule-Based + ML sudah terpasang pada backend staging; ML sengaja belum aktif karena dataset nyata kosong.** Build/test, migration object, function deployment, serta fallback/pipeline pada level unit sudah lolos. Rule-Based tetap satu-satunya metode yang dipakai staging sampai transaksi historis nyata memenuhi threshold, kandidat lulus holdout independen, dan owner mengaktifkannya. Frontend source yang baru telah dibangun secara lokal; hasil penyajian Render dan UI terautentikasi masih menunggu verifikasi setelah push.
+
+## Addendum — Bukti Training dan Inference ML Live Staging (14 November 2026)
+
+Addendum ini menggantikan kesimpulan historis “dataset staging kosong/ML belum live” di atas untuk status saat ini. Dataset dan seluruh akun/transaksi/model sintetis di bagian ini hanya berada di project staging. Metrik berikut adalah hasil teknis dari fixture sintetis, bukan klaim performa pelanggan nyata.
+
+### 1. Implementasi lokal
+
+| File | Perubahan |
+|---|---|
+| `scripts/generate-smart-kasbon-demo.mjs` | Generator deterministik seed `20261114`, menolak menimpa file output, menghasilkan fixture dengan marker `SYNTHETIC_SMART_KASBON_DEMO_V1`. |
+| `tests/smart-kasbon-demo.test.js` | Tes determinisme fixture, kematangan, marker, split customer holdout, dan kelayakan metrik aktual fixture. |
+| `supabase/functions/smart-kasbon/index.ts` | Ukuran halaman training diturunkan dari 500 ke 100 record untuk membatasi ukuran permintaan pembacaan ledger. Penyebab request training pertama yang HTTP 500 tidak dapat dipastikan karena log internal Edge tidak tersedia. |
+| `README.md` | Petunjuk pembuatan fixture dan batas STAGING-only; melarang impor atau aktivasi model sintetis di production. |
+
+Verifikasi lokal terbaru: `npm test` **82/82 PASS**, `npm run build:staging` **PASS** (build lokal `5dc9746e5d89`, memakai Publishable Key placeholder dan bukan artefak deployment), `npx --yes deno check supabase/functions/smart-kasbon/index.ts` **PASS**, dan `git diff --check` **PASS**.
+
+### 2. Dataset, training, dan model di staging
+
+- Supabase CLI terautentikasi; `projects list` mengidentifikasi `warungpintar-staging` (`unkmykhwddwhbtuioqrg`, `ACTIVE_HEALTHY`) terpisah dari production `CodeMu` (`skvskjrhhekwvkwuxjec`). Seluruh aksi tulis aplikasi pada addendum ini ditujukan ke toko demo khusus staging.
+- Toko demo `242c15a7-f356-4909-9c12-e177fd9c5975` berisi **1.030 loan generator** dan **1.772 payment generator**. SQL terlingkup memverifikasi seluruh fixture berada pada satu `store_id`; marker disimpan di `decision_features.synthetic_demo`.
+- Dua loan dan dua payment tambahan dibuat sebagai smoke test live aplikasi, bukan bagian generator. Keduanya diberi marker terpisah `SYNTHETIC_SMART_KASBON_LIVE_SMOKE_V1`; jumlah saat ini menjadi **1.032 loan / 1.774 payment**. Loan smoke belum jatuh tempo dan tidak menjadi observasi training.
+- Pipeline aplikasi menghitung **1.000 observasi matang**, **30 belum matang**, **476 on-time**, dan **524 late**. Split holdout kronologis dengan pemisahan customer menghasilkan **800 training / 200 evaluasi**, **400 customer training / 100 customer evaluasi tanpa overlap**. Distribusi kelas evaluasi: 103 on-time dan 97 late; kelas training: 373 on-time dan 427 late.
+- Training dijalankan melalui aksi owner `evaluate_model` pada Edge Function `smart-kasbon`, bukan trainer test. Kandidat tersimpan sebagai `ML_SHADOW`, memenuhi threshold bawaan dan kemudian diaktifkan melalui aksi owner `activate_model`.
+- Status sesudah aktivasi, dikonfirmasi kembali melalui dashboard owner dan tabel training attempt: `ML_ACTIVE`, `activation_eligible=true`; **1 row model**, versi aktif `sklr-v1-2026-11-14T06:01:14.342Z`, 800 train / 200 evaluasi. Permintaan training ulang segera sesudahnya dijawab `rate_limited` sesuai batas satu kali per toko per 24 jam dan tidak membuat row model duplikat.
+
+| Metrik holdout 200 | Model aktual | Baseline Rule-Based |
+|---|---:|---:|
+| Accuracy | 0,750 | 0,720 |
+| Precision | 0,757 | 0,728 |
+| Recall | 0,757 | 0,728 |
+| F1 | 0,757 | 0,728 |
+| ROC-AUC | 0,841 | 0,756 |
+| PR-AUC | 0,855 | 0,795 |
+| Brier score (lebih rendah lebih baik) | 0,163 | 0,203 |
+| Expected calibration error | 0,037 | 0,095 |
+
+Confusion matrix holdout: **TP 78, FP 25, TN 72, FN 25**. Metrik dan kelas di atas dibaca dari artifact/model aktif melalui dashboard Edge staging; tidak direkonstruksi atau dikarang di laporan.
+
+### 3. Inference dan uji aplikasi live
+
+- Aksi `issue` yang digunakan aplikasi memanggil Edge Function staging. Respons aktual menunjukkan `method=machine_learning`, `status=ML_ACTIVE`, prediksi `on_time`, probability `0.7521362878243754`, dan `advisory_only=true`. Keputusan approval/limit tetap milik aturan server; model tidak menggantikannya.
+- Fallback diuji live dengan sementara menempatkan satu model aktif toko demo ke `shadow` menggunakan query staging yang dibatasi `store_id`, lalu mengirim aksi `issue`. Respons adalah `method=rule_based`, `status=RULE_BASED_ACTIVE`, tanpa field probability. Model eligible segera dipulihkan ke `active` melalui endpoint owner; dashboard berikutnya mengonfirmasi kembali `ML_ACTIVE`. Perubahan status sementara ini dicatat agar jelas, tidak ada model yang ditinggalkan nonaktif.
+- Payment live: cicilan 50.000 menghasilkan sisa 150.000; replay payment ID yang sama menghasilkan `idempotent=true`; pembayaran 150.000 berikutnya menghasilkan `settled=true` dan sisa 0.
+- Login owner berhasil. Owner membuat invitation satu kali; pendaftaran/login assistant berhasil dengan role `assistant`. Assistant dapat membuka dashboard dan melihat metode `machine_learning`, tetapi aksi training owner-only ditolak HTTP **403**.
+- Isolasi lintas toko diuji terhadap ID toko staging lain yang memang ada: permintaan dashboard oleh owner demo dan assistant demo masing-masing ditolak HTTP **403**.
+- Browser Render live menampilkan badge STAGING dan form pendaftaran assistant. Layout diuji pada lebar 390, 768, dan 1280 px tanpa horizontal overflow. Ini adalah uji tampilan/auth form; bukan validasi seluruh halaman fitur aplikasi setelah login.
+- Tabel riwayat model hanya berisi satu model aktif, sehingga belum ada beberapa versi yang dapat dibandingkan. Dashboard menampilkan versi aktif beserta metrik aktual.
+
+### 4. Deployment staging dan akses migration
+
+- Frontend live `https://warungpintar-frontend-staging.onrender.com` merespons HTTP 200. Asset `js/app.js` dan `css/style.css` live sama persis byte-for-byte dengan source commit yang diperiksa; runtime config menunjuk ke project staging dan tidak memuat ref production. Deployment Render yang dibuat oleh commit lanjutan dicatat setelah verifikasi push di bawah.
+- Sebelum push lanjutan, Edge Function staging terdaftar ACTIVE versi **7**, `verify_jwt=true`, SHA `7dfd7f96b94e67c21b373e2c3e330743ef7779758ef4ecf120ad51f9b9b89b56`. Deploy final dan pemeriksaan ulang versi/hash masih harus diselesaikan setelah source commit.
+- Pemeriksaan daftar migration resmi gagal karena autentikasi database, bukan karena migration:
+
+  ```text
+  npx --yes supabase migration list --remote=unkmykhwddwhbtuioqrg
+  FATAL: password authentication failed for user "postgres" (SQLSTATE 28P01)
+  ```
+
+  Tidak ada migration dijalankan atau migration ledger diubah dalam pekerjaan addendum ini. Catatan historis mengenai cara migration staging sebelumnya dicatat tetap dipertahankan pada addendum terdahulu; kegagalan CLI ini tidak ditutupi.
+
+### 5. Production, belum terverifikasi, dan blocker
+
+- Project production diverifikasi sebagai `skvskjrhhekwvkwuxjec`, tetapi tidak ada koneksi tulis, training, data demo, aktivasi model sintetis, migration, Edge deployment, atau frontend deployment production dalam pekerjaan ini.
+- **Backup production, audit migration production, serta endpoint dan service binding production belum diverifikasi.** Kegagalan autentikasi DB staging `SQLSTATE 28P01` juga menghalangi audit resmi migration list. Production gate karena itu tetap tertutup.
+- Belum dijalankan rangkaian live seluruh fitur utama aplikasi (kasir, stok, belanja, pengeluaran, laporan, vault/sinkronisasi, serta semua role dan alur desktop/mobile). Uji responsif yang dilakukan terbatas pada halaman auth staging; API Smart Kasbon yang disebut di atas sudah diuji live. Jangan menyamakan cakupan ini dengan full regression produk.
+- Riwayat keuangan staging adalah fixture sintetis dan input aplikasi; bukti ini tidak mengesahkan sumber kas/ledger finansial sebagai benar di dunia nyata. Model tetap advisory dan **tidak boleh dipromosikan ke production**.
+
+**Status addendum ini: STAGING VERIFIED untuk pipeline dan alur inti Smart Kasbon ML; PRODUCTION BLOCKED.** Deployment final dari commit staging dan pembaruan laporan bukti deployment masih merupakan langkah lanjutan. Jangan menggunakan atau mengaktifkan model/data sintetis pada production.

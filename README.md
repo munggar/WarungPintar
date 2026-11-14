@@ -197,6 +197,16 @@ Prediksi memakai Rule-Based sampai ada artifact ML yang lolos evaluasi dan diakt
 
 Kandidat Logistic Regression disimpan sebagai `shadow`. Aktivasi owner memerlukan artifact/schema valid, target dan split yang benar, seluruh metrik holdout valid, PR-AUC lebih tinggi dari baseline Rule-Based, Brier score lebih rendah, dan ECE ≤ 0,1. Status sistem membedakan `RULE_BASED_ACTIVE`, `ML_READY_TO_TRAIN`, `ML_TRAINING`, `ML_SHADOW`, `ML_ACTIVE`, dan `RULE_BASED_FALLBACK`. Training hanya dapat dimulai owner, dikunci/idempotent per toko, dan dibatasi satu percobaan per 24 jam. Bila tidak ada model aktif atau inference gagal, aturan risiko transparan tetap memberi indikasi advisory; aturan approval/limit server tidak pernah diganti ML. Probability dan metrik hanya ditampilkan dari artifact dan holdout aktual, tidak dibuat untuk fallback.
 
+### Dataset sintetis Smart Kasbon (STAGING saja)
+
+`scripts/generate-smart-kasbon-demo.mjs` menghasilkan fixture sintetis deterministik (seed `20261114`) untuk menguji pipeline, bukan untuk mengklaim performa pelanggan. Dataset berisi 1.000 kasbon matang untuk training/holdout kronologis dengan customer holdout terpisah, 30 kasbon belum matang, pembayaran cicilan, variasi nominal/tenor, serta marker `SYNTHETIC_SMART_KASBON_DEMO_V1`. Label tidak disimpan sebagai fitur; pipeline menghitung label dari pembayaran aktual terhadap batas jatuh tempo WIB. Generator hanya menulis file output yang belum ada dan tidak menyentuh Supabase.
+
+```powershell
+node scripts/generate-smart-kasbon-demo.mjs --output="C:\path\aman\smart-kasbon-demo.json"
+```
+
+Fixture hanya boleh dimuat ke toko demo khusus pada project STAGING `unkmykhwddwhbtuioqrg`. Jangan impor ke toko pengguna, jangan commit file dataset/kredensial demo, dan jangan deploy/aktifkan model sintetis di production. Training tetap harus dipanggil melalui Edge Function `smart-kasbon`; hasil kandidat harus memenuhi threshold bawaan tanpa diturunkan. Dataset/akun demo dibersihkan hanya dengan filter marker dan `store_id` demo yang telah diverifikasi—jangan pernah menjalankan pembersihan tanpa kedua batas tersebut.
+
 ### 4. Konfigurasi autentikasi
 
 Konfigurasi staging di `supabase/config.toml` menonaktifkan signup publik (`auth.enable_signup = false`) dan email confirmation (`auth.email.enable_confirmations = false`). Terapkan dan periksa konfigurasi hosted staging secara eksplisit:

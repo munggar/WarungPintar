@@ -14,7 +14,7 @@ import {
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const MODEL_VERSION_PATTERN = /^sklr-v1-\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
-const MODEL_TRAINING_PAGE_SIZE = 500;
+const MODEL_TRAINING_PAGE_SIZE = 100;
 const MODEL_MAX_TRAINING_LOANS = 10000;
 const MODEL_MAX_TRAINING_PAYMENTS = 50000;
 type AdminClient = SupabaseClient<any, 'public'>;
