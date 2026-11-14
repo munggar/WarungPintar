@@ -248,9 +248,12 @@ async function authorizeSmartKasbonLoan(debt, expected) {
   }
   const prediction = decision.model_prediction;
   if (prediction?.state === 'predicted') {
-    toast(`Indikasi model: ${prediction.prediction === 'on_time' ? 'berpotensi lunas tepat waktu' : 'berisiko terlambat'}. Ini prediksi advisory, bukan jaminan.`);
-  } else if (prediction?.state === 'unavailable') {
-    toast('Model ML belum aktif; keputusan tetap berdasarkan aturan batas kasbon.');
+    const outcome = prediction.prediction === 'on_time' ? 'indikasi risiko rendah'
+      : prediction.prediction === 'at_risk' ? 'indikasi risiko tinggi'
+        : 'indikasi belum dapat disimpulkan';
+    toast(prediction.method === 'machine_learning'
+      ? `Metode prediksi: Machine Learning · ${outcome} · model ${prediction.model_version}. Probabilitas ${pct(prediction.probability)}; advisory, bukan jaminan.`
+      : `Metode prediksi: Rule-Based · ${outcome}. ${prediction.explanation || prediction.reason} Rekomendasi advisory, bukan jaminan.`);
   }
   return loanId;
 }
@@ -1326,30 +1329,64 @@ function smartKasbonPanel() {
   }).join('');
   const decisions = (dashboard.decisions || []).slice(0, 5);
   const model = dashboard.model || {};
-  const modelState = model.state === 'active'
-    ? `Model advisory aktif (${esc(model.version)}).`
-    : model.state === 'shadow'
-      ? `Kandidat model shadow (${esc(model.version)}), belum memengaruhi keputusan.`
-      : model.state === 'rejected'
-        ? 'Kandidat terakhir belum memenuhi syarat.'
-        : model.state === 'disabled'
-          ? 'Model dinonaktifkan.'
-          : 'Belum ada model yang dapat digunakan.';
-  const activeModelText = model.active_version && model.active_version !== model.version
-    ? ` Model advisory aktif: ${esc(model.active_version)}.`
-    : '';
-  const evaluation = model.metrics?.evaluation;
+  const activeModel = model.active_model;
+  const currentCandidate = activeModel || model;
+  const evaluation = currentCandidate.metrics?.evaluation;
   const hasEvaluation = evaluation && Number.isSafeInteger(evaluation.sample_count)
-    && ['accuracy', 'brier_score', 'expected_calibration_error'].every((key) => Number.isFinite(evaluation[key]));
-  const evaluationText = hasEvaluation
-    ? `Holdout ${evaluation.sample_count} contoh: akurasi ${pct(evaluation.accuracy)}, Brier ${evaluation.brier_score.toFixed(3)}, ECE ${evaluation.expected_calibration_error.toFixed(3)}.`
-    : '';
-  const trainButton = OWNER()
+    && ['accuracy', 'precision', 'recall', 'f1', 'brier_score', 'expected_calibration_error', 'pr_auc']
+      .every((key) => Number.isFinite(evaluation[key]));
+  const candidateEvaluation = model.state === 'shadow' ? model.metrics?.evaluation : null;
+  const hasCandidateEvaluation = candidateEvaluation && Number.isSafeInteger(candidateEvaluation.sample_count)
+    && ['accuracy', 'precision', 'recall', 'f1', 'pr_auc', 'brier_score', 'expected_calibration_error']
+      .every((key) => Number.isFinite(candidateEvaluation[key]));
+  const status = S.smartKasbonMutationInProgress && model.status === 'ML_READY_TO_TRAIN'
+    ? 'ML_TRAINING' : model.status;
+  const statusLabel = status === 'ML_ACTIVE' ? 'Machine Learning Active'
+    : status === 'ML_READY_TO_TRAIN' ? 'ML Ready to Train'
+      : status === 'ML_TRAINING' ? 'ML Training'
+        : status === 'ML_SHADOW' ? 'ML Shadow'
+          : status === 'RULE_BASED_FALLBACK' ? 'Rule-Based Fallback'
+            : 'Rule-Based';
+  const statusExplanation = status === 'ML_ACTIVE'
+    ? 'Prediksi berikutnya memakai artifact ML aktif. Keputusan batas dan persetujuan tetap ditentukan aturan server.'
+    : status === 'ML_READY_TO_TRAIN'
+      ? 'Dataset memenuhi ambang training, tetapi model belum dilatih dan diaktifkan. Sistem masih menggunakan Rule-Based.'
+      : status === 'ML_SHADOW'
+        ? 'Kandidat belum aktif. Prediksi tetap menggunakan Rule-Based sampai kandidat lolos evaluasi dan diaktifkan pemilik.'
+        : status === 'RULE_BASED_FALLBACK'
+          ? 'Machine Learning gagal atau artifact tidak valid; sistem kembali ke aturan bisnis sementara.'
+          : 'Machine Learning belum aktif karena data historis belum mencukupi. Sistem menggunakan aturan bisnis sementara.';
+  const trainButton = OWNER() && model.readiness?.eligible && !S.smartKasbonMutationInProgress
     ? '<button class="btn small" data-act="smart-kasbon-model-evaluate">Latih dan evaluasi dari data toko</button>'
     : '';
   const activateButton = OWNER() && model.state === 'shadow'
     && model.metrics?.activation_eligible === true && model.active_version !== model.version
     ? `<button class="btn small" data-act="smart-kasbon-model-activate" data-version="${esc(model.version)}">Aktifkan advisory</button>`
+    : '';
+  const readiness = model.readiness || {};
+  const readinessCounts = readiness.counts || {};
+  const exclusionText = Object.entries(model.exclusions || {})
+    .filter(([, count]) => Number.isSafeInteger(count) && count > 0)
+    .map(([reason, count]) => `${esc(reason)}: ${count}`)
+    .join(' · ');
+  const metricsDetails = hasEvaluation ? `<details><summary>Evaluasi holdout aktual (${evaluation.sample_count} data)</summary>
+    <p class="small">Accuracy ${pct(evaluation.accuracy)} · Precision ${pct(evaluation.precision)} · Recall ${pct(evaluation.recall)} · F1 ${pct(evaluation.f1)}</p>
+    <p class="small">ROC-AUC ${Number.isFinite(evaluation.roc_auc) ? pct(evaluation.roc_auc) : 'tidak tersedia'} · PR-AUC ${pct(evaluation.pr_auc)} · Brier ${evaluation.brier_score.toFixed(3)} · ECE ${evaluation.expected_calibration_error.toFixed(3)}</p>
+    <p class="small">Confusion matrix: TP ${evaluation.confusion_matrix?.true_positive ?? '—'}, FP ${evaluation.confusion_matrix?.false_positive ?? '—'}, TN ${evaluation.confusion_matrix?.true_negative ?? '—'}, FN ${evaluation.confusion_matrix?.false_negative ?? '—'}.</p>
+    ${Number.isFinite(currentCandidate.metrics?.baseline?.pr_auc) ? `<p class="small">Baseline Rule-Based PR-AUC ${pct(currentCandidate.metrics.baseline.pr_auc)}, Brier ${Number.isFinite(currentCandidate.metrics.baseline.brier_score) ? currentCandidate.metrics.baseline.brier_score.toFixed(3) : '—'}.</p>` : ''}
+    </details>` : '';
+  const modelDetails = status === 'ML_ACTIVE' && activeModel
+    ? `<p class="small">Model ${esc(activeModel.version)} · dilatih ${fmtDate(activeModel.trained_at)} · ${activeModel.training_count} data training · ${activeModel.evaluation_count} data evaluasi.</p>
+      <p class="muted small">Model logistik per toko; hasil historis holdout tidak menjamin hasil mendatang dan dapat bias jika data transaksi/snapshot tidak lengkap atau berbeda.</p>${metricsDetails}`
+    : model.state === 'shadow'
+      ? `<p class="small">Kandidat ${esc(model.version)} · ${model.training_count} data training · ${model.evaluation_count} data evaluasi · ${model.metrics?.activation_eligible ? 'memenuhi guard evaluasi, menunggu aktivasi owner' : 'belum memenuhi guard evaluasi'}.</p>${metricsDetails}`
+      : '';
+  const candidateDetails = status === 'ML_ACTIVE' && model.state === 'shadow'
+    ? `<details><summary>Evaluasi kandidat ${esc(model.version)}</summary>
+      <p class="small">${model.training_count} data training · ${model.evaluation_count} data evaluasi · ${model.metrics?.activation_eligible ? 'memenuhi guard evaluasi' : 'belum memenuhi guard evaluasi'}.</p>
+      ${hasCandidateEvaluation
+        ? `<p class="small">Holdout: accuracy ${pct(candidateEvaluation.accuracy)} · precision ${pct(candidateEvaluation.precision)} · recall ${pct(candidateEvaluation.recall)} · F1 ${pct(candidateEvaluation.f1)} · PR-AUC ${pct(candidateEvaluation.pr_auc)} · Brier ${candidateEvaluation.brier_score.toFixed(3)} · ECE ${candidateEvaluation.expected_calibration_error.toFixed(3)}.</p>` : ''}
+      </details>`
     : '';
   return `<section class="card">
     <div class="row wrap"><h2>Smart Kasbon</h2>${setupButton}<button class="btn ghost small" data-act="smart-kasbon-refresh">Perbarui</button></div>
@@ -1364,7 +1401,20 @@ function smartKasbonPanel() {
     <p class="muted small">Batas ini adalah aturan internal, bukan jaminan kesehatan usaha. Snapshot dan kas/modal kerja berasal dari browser/pemilik dan tidak dapat diverifikasi server terhadap vault terenkripsi.</p>
     <p class="small">Risiko riwayat pelanggan: ${esc(riskText)}.</p>
     ${riskRows ? `<details><summary>Skor risiko pelanggan (${risks.length})</summary><ul class="rows">${riskRows}</ul>${risks.length > 10 ? `<p class="muted small">Menampilkan 10 dari ${risks.length} pelanggan.</p>` : ''}</details>` : ''}
-    <p class="muted small">Keputusan limit tetap memakai aturan transparan. ${modelState}${activeModelText} ${esc(evaluationText)} Prediksi ML hanya advisory dan tidak mengubah persetujuan kasbon.</p>
+    <p><span class="chip ${status === 'ML_ACTIVE' ? 'ok' : 'warn'}">${esc(statusLabel)}</span></p>
+    <p class="small">Metode prediksi: ${status === 'ML_ACTIVE' ? 'Machine Learning' : 'Rule-Based'}</p>
+    <p class="muted small">${esc(statusExplanation)}</p>
+    ${status !== 'ML_ACTIVE' ? `<p class="muted small">Status kesiapan dataset: ${esc(status)}. ${esc(readiness.reason || 'Kelayakan belum tersedia.')}</p>` : ''}
+    ${OWNER() ? `<details><summary>Kesiapan dataset dan status training</summary>
+      <p class="small">Observasi matang ${readinessCounts.mature_observations ?? 0} · on-time ${readinessCounts.on_time ?? 0} · late ${readinessCounts.late ?? 0}.</p>
+      <p class="small">Split yang memenuhi minimum: training ${readinessCounts.training_observations ?? 0} · evaluasi ${readinessCounts.evaluation_observations ?? 0} · pelanggan evaluasi independen ${readinessCounts.evaluation_customers ?? 0}.</p>
+      <p class="small">Ambang: training ${model.minimums?.trainingRows ?? '—'}, evaluasi ${model.minimums?.evaluationRows ?? '—'}, per kelas training ${model.minimums?.trainingPerClass ?? '—'}, per kelas evaluasi ${model.minimums?.evaluationPerClass ?? '—'}, pelanggan evaluasi ${model.minimums?.evaluationCustomers ?? '—'}.</p>
+      ${exclusionText ? `<p class="muted small">Data dikecualikan: ${exclusionText}.</p>` : ''}
+      ${model.source_limit_exceeded ? '<p class="err small">Dataset melebihi batas maksimum pemrosesan; training ditahan.</p>' : ''}
+      ${model.training_status?.last_error_code ? `<p class="err small">Kode kegagalan terakhir: ${esc(model.training_status.last_error_code)}.</p>` : ''}
+      </details>` : ''}
+    ${modelDetails}
+    ${candidateDetails}
     <div class="row wrap">${trainButton}${activateButton}</div>
     ${decisions.length ? `<details><summary>Keputusan terbaru (${decisions.length})</summary><ul class="plain small">${decisions.map((item) => `<li>${esc(item.action)} · ${item.approved === null ? 'dicatat' : item.approved ? 'disetujui' : 'ditolak'} · ${fmtDate(item.created_at)}</li>`).join('')}</ul></details>` : ''}
   </section>`;

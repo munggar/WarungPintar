@@ -1,12 +1,15 @@
-import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
+import { createClient, type SupabaseClient } from 'https://esm.sh/@supabase/supabase-js@2';
 import { validatedSmartKasbonTimestamp } from '../../../js/logic.js';
 import {
-  buildSmartKasbonTrainingExamples,
-  predictSmartKasbonModel,
+  assessSmartKasbonDataset,
+  buildSmartKasbonTrainingDataset,
+  isSmartKasbonModelEvaluationEligible,
+  predictSmartKasbonHybrid,
+  predictSmartKasbonRuleBased,
+  resolveSmartKasbonModelMinimums,
   smartKasbonFeatureVector,
   trainAndEvaluateSmartKasbonModel,
   validateSmartKasbonModelArtifact,
-  SMART_KASBON_MODEL_MINIMUMS,
 } from '../_shared/smart-kasbon-model.js';
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -14,6 +17,7 @@ const MODEL_VERSION_PATTERN = /^sklr-v1-\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{
 const MODEL_TRAINING_PAGE_SIZE = 500;
 const MODEL_MAX_TRAINING_LOANS = 10000;
 const MODEL_MAX_TRAINING_PAYMENTS = 50000;
+type AdminClient = SupabaseClient<any, 'public'>;
 
 class ValidationError extends Error {}
 
@@ -23,7 +27,19 @@ type SmartKasbonLoanRow = {
   amount: number;
   paid_amount: number;
   due_date: string;
+  created_at: string;
   status: string;
+  settled_at: string | null;
+  decision_features: Record<string, unknown>;
+};
+
+type ActiveSmartKasbonModel = {
+  version: string;
+  feature_version: string;
+  model: Record<string, unknown>;
+  metrics: Record<string, unknown>;
+  training_count: number;
+  evaluation_count: number;
 };
 
 function corsHeaders(request: Request) {
@@ -138,6 +154,163 @@ function bootstrapPayload(value: unknown) {
   };
 }
 
+function configuredModelMinimums() {
+  const values: Record<string, string | undefined> = {};
+  for (const name of [
+    'SMART_KASBON_ML_MIN_TRAINING_ROWS',
+    'SMART_KASBON_ML_MIN_EVALUATION_ROWS',
+    'SMART_KASBON_ML_MIN_TRAINING_PER_CLASS',
+    'SMART_KASBON_ML_MIN_EVALUATION_PER_CLASS',
+    'SMART_KASBON_ML_MIN_EVALUATION_CUSTOMERS',
+  ]) values[name] = Deno.env.get(name);
+  return resolveSmartKasbonModelMinimums(values);
+}
+
+async function loadModelDataset(admin: AdminClient, storeId: string) {
+  const loans: SmartKasbonLoanRow[] = [];
+  const payments: Array<Record<string, unknown>> = [];
+  let tooLarge = false;
+  for (let offset = 0; ; offset += MODEL_TRAINING_PAGE_SIZE) {
+    const { data, error } = await admin.from('smart_kasbon_loans')
+      .select('id,customer_id,amount,paid_amount,due_date,created_at,status,settled_at,decision_features')
+      .eq('store_id', storeId).eq('status', 'active')
+      .order('created_at', { ascending: true }).order('id', { ascending: true })
+      .range(offset, offset + MODEL_TRAINING_PAGE_SIZE - 1);
+    if (error) throw error;
+    const page = (data ?? []) as SmartKasbonLoanRow[];
+    loans.push(...page);
+    if (loans.length > MODEL_MAX_TRAINING_LOANS) {
+      tooLarge = true;
+      break;
+    }
+    const loanIds = page.map((loan) => loan.id);
+    if (loanIds.length) {
+      for (let paymentOffset = 0; ; paymentOffset += 1000) {
+        const { data: paymentRows, error: paymentError } = await admin.from('smart_kasbon_payments')
+          .select('id,loan_id,amount,paid_at').eq('store_id', storeId).in('loan_id', loanIds)
+          .order('paid_at', { ascending: true }).order('id', { ascending: true })
+          .range(paymentOffset, paymentOffset + 999);
+        if (paymentError) throw paymentError;
+        const paymentPage = paymentRows ?? [];
+        payments.push(...paymentPage);
+        if (payments.length > MODEL_MAX_TRAINING_PAYMENTS) {
+          tooLarge = true;
+          break;
+        }
+        if (paymentPage.length < 1000) break;
+      }
+      if (tooLarge) break;
+    }
+    if (page.length < MODEL_TRAINING_PAGE_SIZE) break;
+  }
+  const dataset = tooLarge
+    ? { examples: [], exclusions: { dataset_too_large: 1 } }
+    : buildSmartKasbonTrainingDataset(loans, payments, Date.now());
+  return {
+    tooLarge,
+    ...dataset,
+    readiness: assessSmartKasbonDataset(dataset.examples, configuredModelMinimums()),
+  };
+}
+
+async function updateModelTrainingStatus(
+  admin: AdminClient,
+  storeId: string,
+  update: Record<string, unknown>,
+) {
+  const { error } = await admin.from('smart_kasbon_model_training_attempts')
+    .update({ ...update, updated_at: new Date().toISOString() }).eq('store_id', storeId);
+  if (error) throw error;
+}
+
+async function advisoryPrediction(
+  admin: AdminClient,
+  storeId: string,
+  loanId: string,
+  decision: Record<string, unknown>,
+  amount: number,
+  dueDate: string,
+) {
+  const ruleBased = () => {
+    try {
+      return predictSmartKasbonRuleBased(decision);
+    } catch (error) {
+      console.error('Rule-based Smart Kasbon explanation could not be calculated.', error);
+      return {
+        method: 'rule_based',
+        state: 'unavailable',
+        reason: 'Data risiko server tidak lengkap; tidak ada indikasi prediksi yang ditampilkan.',
+        advisory_only: true,
+      };
+    }
+  };
+  let activeModel: ActiveSmartKasbonModel | null = null;
+  try {
+    const { data: loan, error: loanError } = await admin.from('smart_kasbon_loans')
+      .select('created_at,decision_features').eq('store_id', storeId).eq('id', loanId).maybeSingle();
+    if (loanError) throw loanError;
+    if (!loan) throw new Error('Stored loan snapshot is unavailable.');
+    const { data, error: modelError } = await admin.from('smart_kasbon_model_versions')
+      .select('version,feature_version,model,metrics,training_count,evaluation_count')
+      .eq('store_id', storeId).eq('state', 'active').maybeSingle();
+    if (modelError) throw modelError;
+    activeModel = data as ActiveSmartKasbonModel | null;
+    if (!activeModel) {
+      return predictSmartKasbonHybrid({
+        model: null,
+        features: [],
+        decision,
+        minimums: configuredModelMinimums(),
+      });
+    }
+    const minimums = configuredModelMinimums();
+    const features = smartKasbonFeatureVector({
+      amount,
+      due_date: dueDate,
+      created_at: loan.created_at,
+      decision_features: loan.decision_features,
+    });
+    const result = predictSmartKasbonHybrid({
+      model: {
+        artifact: activeModel.model,
+        feature_version: activeModel.feature_version,
+        metrics: activeModel.metrics,
+        training_count: activeModel.training_count,
+        evaluation_count: activeModel.evaluation_count,
+      },
+      features,
+      decision,
+      minimums,
+    });
+    if (result.status === 'RULE_BASED_FALLBACK') {
+      console.error('Smart Kasbon active artifact failed validation; using rule-based fallback.');
+      throw new TypeError('Active model artifact or evaluation eligibility is invalid.');
+    }
+    return result;
+  } catch (error) {
+    console.error('Smart Kasbon ML inference failed; using rule-based fallback.', error);
+    if (activeModel?.version) {
+      const { error: disableError } = await admin.from('smart_kasbon_model_versions')
+        .update({ state: 'disabled' }).eq('store_id', storeId)
+        .eq('version', activeModel.version).eq('state', 'active');
+      if (disableError) console.error('Could not disable the invalid Smart Kasbon model.', disableError);
+    }
+    try {
+      await updateModelTrainingStatus(admin, storeId, {
+        state: 'RULE_BASED_FALLBACK',
+        last_error_code: 'MODEL_INFERENCE_FAILED',
+      });
+    } catch (statusError) {
+      console.error('Could not persist Smart Kasbon fallback status.', statusError);
+    }
+    return {
+      ...ruleBased(),
+      status: 'RULE_BASED_FALLBACK',
+      explanation: 'Machine Learning tidak dapat digunakan pada permintaan ini. Sistem menggunakan aturan bisnis sementara.',
+    };
+  }
+}
+
 Deno.serve(async (request) => {
   const headers = corsHeaders(request);
   if (request.method === 'OPTIONS') return new Response('ok', { headers });
@@ -175,13 +348,18 @@ Deno.serve(async (request) => {
 
     let result: unknown;
     if (action === 'dashboard') {
-      const [policyResult, decisionsResult, modelsResult, activeModelResult] = await Promise.all([
+      const [policyResult, decisionsResult, modelsResult, activeModelResult, trainingStatusResult] = await Promise.all([
         admin.from('smart_kasbon_policies').select('*').eq('store_id', storeId).maybeSingle(),
         admin.from('smart_kasbon_decisions').select('id,loan_id,customer_id,action,approved,decision,created_at').eq('store_id', storeId).order('id', { ascending: false }).limit(20),
         admin.from('smart_kasbon_model_versions').select('version,state,metrics,training_count,evaluation_count,created_at').eq('store_id', storeId).order('id', { ascending: false }).limit(1),
-        admin.from('smart_kasbon_model_versions').select('version').eq('store_id', storeId).eq('state', 'active').maybeSingle(),
+        admin.from('smart_kasbon_model_versions').select('version,feature_version,model,metrics,training_count,evaluation_count,created_at').eq('store_id', storeId).eq('state', 'active').maybeSingle(),
+        admin.from('smart_kasbon_model_training_attempts')
+          .select('state,eligible_count,on_time_count,late_count,exclusion_counts,last_error_code,last_trained_at,updated_at')
+          .eq('store_id', storeId).maybeSingle(),
       ]);
-      for (const item of [policyResult, decisionsResult, modelsResult, activeModelResult]) if (item.error) throw item.error;
+      for (const item of [policyResult, decisionsResult, modelsResult, activeModelResult, trainingStatusResult]) if (item.error) throw item.error;
+      const minimums = configuredModelMinimums();
+      const dataset = await loadModelDataset(admin, storeId);
       const policy = policyResult.data;
       const { data: health, error: healthError } = await admin.rpc('smart_kasbon_evaluate', {
         p_store_id: storeId,
@@ -216,6 +394,33 @@ Deno.serve(async (request) => {
         }));
         riskResults.push(...batch);
       }
+      const latestModel = modelsResult.data?.[0] ?? null;
+      const activeModel = activeModelResult.data ?? null;
+      let modelStatus = activeModel ? 'ML_ACTIVE'
+        : trainingStatusResult.data?.state === 'ML_TRAINING' ? 'ML_TRAINING'
+          : latestModel?.state === 'shadow' ? 'ML_SHADOW'
+            : trainingStatusResult.data?.last_error_code ? 'RULE_BASED_FALLBACK'
+              : dataset.readiness.eligible ? 'ML_READY_TO_TRAIN'
+                : 'RULE_BASED_ACTIVE';
+      if (activeModel) {
+        try {
+          validateSmartKasbonModelArtifact(activeModel.model);
+          if (activeModel.model.feature_version !== activeModel.feature_version
+            || !isSmartKasbonModelEvaluationEligible(activeModel.metrics, minimums)) {
+            throw new TypeError('Active model eligibility or artifact metadata is invalid.');
+          }
+        } catch (error) {
+          console.error('Invalid active Smart Kasbon model; disabling it for rule fallback.', error);
+          const { error: disableError } = await admin.from('smart_kasbon_model_versions')
+            .update({ state: 'disabled' }).eq('store_id', storeId).eq('version', activeModel.version).eq('state', 'active');
+          if (disableError) throw disableError;
+          modelStatus = 'RULE_BASED_FALLBACK';
+          await updateModelTrainingStatus(admin, storeId, {
+            state: modelStatus,
+            last_error_code: 'ARTIFACT_INVALID',
+          });
+        }
+      }
       result = {
         policy,
         health,
@@ -229,20 +434,41 @@ Deno.serve(async (request) => {
         risks: riskResults,
         decisions: decisionsResult.data ?? [],
         model: {
-          ...(modelsResult.data?.[0] ?? { state: 'cold_start', training_count: 0, evaluation_count: 0 }),
-          active_version: activeModelResult.data?.version ?? null,
+          ...(latestModel ?? { state: 'cold_start', training_count: 0, evaluation_count: 0 }),
+          status: modelStatus,
+          method: modelStatus === 'ML_ACTIVE' ? 'machine_learning' : 'rule_based',
+          active_model: modelStatus === 'ML_ACTIVE' ? {
+            version: activeModel?.version,
+            trained_at: activeModel?.model?.trained_at,
+            training_count: activeModel?.training_count,
+            evaluation_count: activeModel?.evaluation_count,
+            metrics: activeModel?.metrics,
+          } : null,
+          active_version: modelStatus === 'ML_ACTIVE' ? activeModel?.version ?? null : null,
+          readiness: dataset.readiness,
+          exclusions: dataset.exclusions,
+          training_status: trainingStatusResult.data ?? null,
+          minimums,
+          source_limit_exceeded: dataset.tooLarge,
         },
       };
     } else if (action === 'evaluate_model') {
-      const { count: sourceLoanCount, error: countError } = await admin.from('smart_kasbon_loans')
-        .select('id', { count: 'exact', head: true }).eq('store_id', storeId).eq('status', 'active');
-      if (countError) throw countError;
-      if ((sourceLoanCount ?? 0) < SMART_KASBON_MODEL_MINIMUMS.trainingRows + SMART_KASBON_MODEL_MINIMUMS.evaluationRows) {
+      const minimums = configuredModelMinimums();
+      const dataset = await loadModelDataset(admin, storeId);
+      if (dataset.tooLarge) {
         result = {
-          state: 'insufficient_data',
-          reason: 'Belum ada cukup riwayat kasbon nyata untuk train dan holdout independen.',
-          source_loan_count: sourceLoanCount ?? 0,
-          minimums: SMART_KASBON_MODEL_MINIMUMS,
+          state: 'RULE_BASED_FALLBACK',
+          reason: 'Riwayat toko melebihi batas aman satu proses pelatihan.',
+          maximum_loans: MODEL_MAX_TRAINING_LOANS,
+          maximum_payments: MODEL_MAX_TRAINING_PAYMENTS,
+          readiness: dataset.readiness,
+          exclusions: dataset.exclusions,
+        };
+      } else if (!dataset.readiness.eligible) {
+        result = {
+          ...dataset.readiness,
+          state: 'RULE_BASED_ACTIVE',
+          exclusions: dataset.exclusions,
         };
       } else {
         const { data: reserved, error: reserveError } = await admin.rpc('reserve_smart_kasbon_model_training', {
@@ -252,61 +478,35 @@ Deno.serve(async (request) => {
         if (reserved !== true) {
           result = { state: 'rate_limited', reason: 'Pelatihan model dibatasi satu kali per toko setiap 24 jam.' };
         } else {
-          const loans: Array<Record<string, unknown>> = [];
-          const payments: Array<Record<string, unknown>> = [];
-          let tooManyRows = false;
-          for (let offset = 0; ; offset += MODEL_TRAINING_PAGE_SIZE) {
-            const { data, error } = await admin.from('smart_kasbon_loans')
-              .select('id,customer_id,amount,paid_amount,due_date,created_at,status,settled_at,decision_features')
-              .eq('store_id', storeId).eq('status', 'active')
-              .order('created_at', { ascending: true }).order('id', { ascending: true })
-              .range(offset, offset + MODEL_TRAINING_PAGE_SIZE - 1);
-            if (error) throw error;
-            const page = data ?? [];
-            loans.push(...page);
-            if (loans.length > MODEL_MAX_TRAINING_LOANS) {
-              tooManyRows = true;
-              break;
-            }
-            const loanIds = page.map((loan) => loan.id);
-            if (loanIds.length) {
-              for (let paymentOffset = 0; ; paymentOffset += 1000) {
-                const { data: paymentRows, error: paymentError } = await admin.from('smart_kasbon_payments')
-                  .select('id,loan_id,amount,paid_at').eq('store_id', storeId).in('loan_id', loanIds)
-                  .order('paid_at', { ascending: true }).order('id', { ascending: true })
-                  .range(paymentOffset, paymentOffset + 999);
-                if (paymentError) throw paymentError;
-                const paymentPage = paymentRows ?? [];
-                payments.push(...paymentPage);
-                if (payments.length > MODEL_MAX_TRAINING_PAYMENTS) {
-                  tooManyRows = true;
-                  break;
-                }
-                if (paymentPage.length < 1000) break;
-              }
-              if (tooManyRows) break;
-            }
-            if (page.length < MODEL_TRAINING_PAGE_SIZE) break;
-          }
-          if (tooManyRows) {
-            result = {
-              state: 'dataset_too_large',
-              reason: 'Riwayat toko melebihi batas aman satu proses pelatihan.',
-              maximum_loans: MODEL_MAX_TRAINING_LOANS,
-              maximum_payments: MODEL_MAX_TRAINING_PAYMENTS,
-            };
-          } else {
-            const examples = buildSmartKasbonTrainingExamples(loans, payments, Date.now());
-            const training = trainAndEvaluateSmartKasbonModel(examples);
+          await updateModelTrainingStatus(admin, storeId, {
+            state: 'ML_TRAINING',
+            eligible_count: dataset.readiness.counts.mature_observations,
+            on_time_count: dataset.readiness.counts.on_time,
+            late_count: dataset.readiness.counts.late,
+            exclusion_counts: dataset.exclusions,
+            last_error_code: null,
+          });
+          try {
+            const training = trainAndEvaluateSmartKasbonModel(dataset.examples, { minimums });
             if (training.state !== 'candidate' || !training.model || !training.metrics) {
+              await updateModelTrainingStatus(admin, storeId, {
+                state: 'RULE_BASED_ACTIVE',
+                last_error_code: 'DATASET_INVALID',
+                exclusion_counts: dataset.exclusions,
+              });
               result = {
-                state: 'insufficient_data',
+                ...dataset.readiness,
+                state: 'RULE_BASED_ACTIVE',
                 reason: training.reason || 'Data matang belum memenuhi syarat evaluasi.',
                 counts: training.counts,
-                minimums: training.minimums ?? SMART_KASBON_MODEL_MINIMUMS,
+                minimums,
+                exclusions: dataset.exclusions,
               };
             } else {
               validateSmartKasbonModelArtifact(training.model);
+              if (!isSmartKasbonModelEvaluationEligible(training.metrics, minimums)) {
+                training.metrics.activation_eligible = false;
+              }
               const { error: insertError } = await admin.from('smart_kasbon_model_versions').insert({
                 store_id: storeId,
                 version: training.model.version,
@@ -318,17 +518,35 @@ Deno.serve(async (request) => {
                 evaluation_count: training.metrics.evaluation_count,
               });
               if (insertError) throw insertError;
+              await updateModelTrainingStatus(admin, storeId, {
+                state: 'ML_SHADOW',
+                eligible_count: training.counts.eligible_count,
+                on_time_count: training.counts.training_class_counts.positive
+                  + training.counts.evaluation_class_counts.positive,
+                late_count: training.counts.training_class_counts.negative
+                  + training.counts.evaluation_class_counts.negative,
+                exclusion_counts: dataset.exclusions,
+                last_error_code: null,
+                last_trained_at: training.model.trained_at,
+              });
               result = {
-                state: 'shadow',
+                state: 'ML_SHADOW',
                 version: training.model.version,
                 activation_eligible: training.metrics.activation_eligible,
                 metrics: training.metrics,
                 counts: training.counts,
+                exclusions: dataset.exclusions,
                 reason: training.metrics.activation_eligible
                   ? 'Kandidat hanya disimpan sebagai shadow; aktivasi advisory memerlukan tindakan pemilik.'
                   : 'Kandidat disimpan sebagai shadow dan belum memenuhi ambang aktivasi.',
               };
             }
+          } catch (error) {
+            await updateModelTrainingStatus(admin, storeId, {
+              state: 'RULE_BASED_FALLBACK',
+              last_error_code: error instanceof TypeError ? 'ARTIFACT_INVALID' : 'TRAINING_FAILED',
+            });
+            throw error;
           }
         }
       }
@@ -342,7 +560,7 @@ Deno.serve(async (request) => {
       if (!candidate) throw new ValidationError('Kandidat model tidak ditemukan atau sudah berubah status.');
       validateSmartKasbonModelArtifact(candidate.model);
       if (candidate.model.feature_version !== candidate.feature_version
-        || candidate.metrics?.activation_eligible !== true) {
+        || !isSmartKasbonModelEvaluationEligible(candidate.metrics, configuredModelMinimums())) {
         throw new ValidationError('Kandidat model belum memenuhi syarat aktivasi advisory.');
       }
       const { data: activated, error: activateError } = await admin.rpc('activate_smart_kasbon_model', {
@@ -351,10 +569,13 @@ Deno.serve(async (request) => {
       });
       if (activateError) throw activateError;
       if (activated !== true) throw new Error('Model tidak berhasil diaktifkan.');
+      await updateModelTrainingStatus(admin, storeId, {
+        state: 'ML_ACTIVE',
+        last_error_code: null,
+      });
       result = { state: 'active', version, advisory_only: true };
     } else {
       let rpcPayload: Record<string, unknown> = {};
-      let modelPrediction: Record<string, unknown> | null = null;
       if (action === 'clear_history') {
         if (payload.reset_policy != null && typeof payload.reset_policy !== 'boolean') {
           throw new ValidationError('Penanda reset kebijakan tidak valid.');
@@ -387,52 +608,6 @@ Deno.serve(async (request) => {
         return Response.json({ error: 'Aksi Smart Kasbon tidak dikenal.' }, { status: 400, headers });
       }
 
-      if (action === 'issue') {
-        const { data: policyDecision, error: decisionError } = await admin.rpc('smart_kasbon_evaluate', {
-          p_store_id: storeId,
-          p_customer_id: rpcPayload.customer_id,
-          p_amount: rpcPayload.amount,
-        });
-        if (decisionError) throw decisionError;
-        if (policyDecision?.approved !== true) {
-          modelPrediction = { state: 'not_run', reason: 'Permintaan tidak disetujui oleh aturan batas kasbon.' };
-        } else {
-          const jakartaToday = new Date(Date.now() + 7 * 60 * 60 * 1000).toISOString().slice(0, 10);
-          if (String(rpcPayload.due_date) < jakartaToday) {
-            modelPrediction = { state: 'not_run', reason: 'Tanggal jatuh tempo telah lewat sebelum prediksi dapat dibuat.' };
-          } else {
-            const { data: activeModel, error: activeModelError } = await admin.from('smart_kasbon_model_versions')
-              .select('version,feature_version,model')
-              .eq('store_id', storeId).eq('state', 'active').maybeSingle();
-            if (activeModelError) throw activeModelError;
-            if (!activeModel) {
-              modelPrediction = {
-                state: 'unavailable',
-                reason: 'Belum ada model yang diaktifkan; keputusan tetap mengikuti aturan batas kasbon.',
-              };
-            } else {
-              validateSmartKasbonModelArtifact(activeModel.model);
-              if (activeModel.model.feature_version !== activeModel.feature_version) {
-                throw new Error('Versi fitur model aktif tidak sesuai dengan artifact.');
-              }
-              const features = smartKasbonFeatureVector({
-                amount: rpcPayload.amount,
-                due_date: rpcPayload.due_date,
-                created_at: new Date().toISOString(),
-                decision_features: policyDecision,
-              });
-              const prediction = predictSmartKasbonModel(activeModel.model, features);
-              modelPrediction = {
-                state: 'predicted',
-                prediction: prediction.prediction,
-                model_version: prediction.model_version,
-                advisory_only: true,
-              };
-            }
-          }
-        }
-      }
-
       const { data, error } = await admin.rpc('smart_kasbon_transaction', {
         p_action: action,
         p_store_id: storeId,
@@ -443,11 +618,24 @@ Deno.serve(async (request) => {
       result = data;
       if (action === 'issue' && data && typeof data === 'object' && !Array.isArray(data)) {
         const decision = data as Record<string, unknown>;
+        const modelPrediction = decision.approved === true
+          ? await advisoryPrediction(
+            admin,
+            storeId,
+            String(rpcPayload.loan_id),
+            decision,
+            Number(rpcPayload.amount),
+            String(rpcPayload.due_date),
+          )
+          : {
+            method: 'not_run',
+            state: 'not_run',
+            reason: 'Permintaan tidak disetujui oleh aturan batas kasbon.',
+            advisory_only: true,
+          };
         result = {
           ...decision,
-          model_prediction: decision.approved === true
-            ? modelPrediction
-            : { state: 'not_run', reason: 'Permintaan tidak disetujui oleh aturan batas kasbon.' },
+          model_prediction: modelPrediction,
         };
       }
     }

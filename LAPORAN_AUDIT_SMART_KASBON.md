@@ -1479,3 +1479,44 @@ Addendum ini mencatat implementasi ML advisory dan perbaikan route Zakat setelah
 ### Status kesiapan terbaru
 
 **NOT READY / BELUM LAYAK untuk pengguna nyata.** Backend pipeline ML dan migration staging aktif, dan source frontend terbaru telah terverifikasi live. Namun staging belum memiliki satu pun kasbon untuk training sehingga tidak ada model/performa bisnis yang tervalidasi; migration CLI repair tetap terhalang password DB; dan E2E owner/assistant terautentikasi serta pgTAP belum dibuktikan. Smart Kasbon tetap memakai aturan SQL untuk seluruh keputusan sampai tersedia data nyata yang memadai, evaluasi independen yang memenuhi ambang, dan aktivasi advisory yang disetujui owner.
+
+## Addendum — Implementasi Hybrid Smart Kasbon Rule-Based + ML (14 November 2026)
+
+Addendum ini memperbarui status terbaru untuk permintaan hybrid. Implementasi ML sebelumnya dipertahankan dan diperkuat; tidak ada model/artifact atau performa bisnis sintetis yang dibuat.
+
+### Perilaku dan integrasi
+
+- `supabase/functions/_shared/smart-kasbon-model.js` sekarang membentuk dataset dengan alasan eksklusi terhitung: kasbon belum matang, status/field invalid, ID ganda, snapshot fitur hilang/tidak valid, pembayaran invalid, dan ledger `paid_amount`/`settled_at` yang tidak konsisten dengan pembayaran. Label on-time hanya bila seluruh pokok telah dibayar sampai akhir tanggal jatuh tempo WIB; jika belum lunas setelah batas tersebut dan observasi matang, label late. Sampel belum jatuh tempo bukan late.
+- Snapshot fitur saat keputusan terbit sudah disimpan pada `decision_features` oleh transaksi SQL. Fitur training hanya berasal dari snapshot saat terbit (nominal, tenor, risiko/riwayat yang tersedia, margin/tren/arus kas dan freshness); pembayaran pasca-penerbitan hanya digunakan untuk label, bukan fitur.
+- Readiness memakai split kronologis 80/20 dan mengecualikan pelanggan yang muncul di training dari holdout. Ambang default adalah 100 baris training, 40 evaluasi, sedikitnya 25 per kelas training, 10 per kelas evaluasi, dan 10 pelanggan holdout independen. Nilai dapat dinaikkan dengan environment `SMART_KASBON_ML_MIN_*`; batas tidak dapat diturunkan dari default. Proses dibatasi 10.000 kasbon/50.000 pembayaran.
+- Logistic Regression melatih kandidat dari ledger toko terkait saja. Evaluasi menghasilkan accuracy, precision, recall, F1, confusion matrix, ROC-AUC, PR-AUC, Brier, ECE, dan pembanding Rule-Based. Aktivasi memerlukan artifact/schema dan metrik valid, jumlah kelas/holdout sesuai ambang, PR-AUC di atas baseline Rule-Based, Brier lebih rendah, dan ECE ≤ 0,1. Aktivasi tetap eksplisit oleh owner; kandidat tetap `shadow` jika guard gagal.
+- Status persisten membedakan `RULE_BASED_ACTIVE`, `ML_READY_TO_TRAIN`, `ML_TRAINING`, `ML_SHADOW`, `ML_ACTIVE`, dan `RULE_BASED_FALLBACK`. Training hanya tersedia bagi owner toko sendiri, memiliki advisory lock/idempotensi per toko dan batas satu percobaan per 24 jam. Assistant tetap hanya memakai dashboard/prediksi yang diizinkan.
+- Setelah transaksi kasbon disimpan oleh aturan server, inference memakai snapshot immutable yang tersimpan. Tanpa model aktif, output menyatakan `Rule-Based`; jika artifact/metrics/inference gagal, error dicatat, model invalid dinonaktifkan bila perlu, dan output menggunakan Rule-Based. Fallback tidak memuat probability atau metrik ML.
+- `js/app.js` menampilkan badge/metode yang benar-benar aktif, alasan menunggu dataset, jumlah label/kelas dan eksklusi bagi owner, tombol training/aktivasi terjaga oleh readiness, serta tanggal/version/jumlah train/evaluasi dan metrik aktual model aktif/kandidat. Hasil tetap advisory dan tidak mengubah approval atau limit SQL.
+- README mencatat alur data, ambang yang dapat dikonfigurasi, aturan aktivasi, mode fallback, dan migration baru. Test fixture sintetis hanya menguji implementasi teknis.
+
+### Validasi source
+
+| Pemeriksaan | Hasil |
+|---|---|
+| `node --test tests/smart-kasbon-ml.test.js` | **PASS — 11/11**; mencakup label WIB, observasi immature, data invalid/inconsistent, split tenant-customer, readiness, Rule-Based, artifact rusak, eligibility holdout, dan inference model teknis. |
+| `npm test` | **PASS — 80/80**. |
+| `npx deno check supabase/functions/smart-kasbon/index.ts` | **PASS**. |
+| `node --check js/app.js` dan helper model | **PASS**. |
+| `npm run build` | **PASS**. |
+| `npm run build:staging` | **PASS — e844da15eddc**, project reference staging; memakai publishable-key placeholder lokal yang tidak dideploy. |
+| `npm audit --omit=dev` | **PASS — 0 vulnerabilities**. |
+| `git diff --check` | **PASS**. |
+
+### Migration dan deployment Supabase staging
+
+- Target CLI diverifikasi sebagai project `warungpintar-staging`, ref `unkmykhwddwhbtuioqrg`. Tidak ada deployment ke production `skvskjrhhekwvkwuxjec`.
+- Migration additive `202611170001_hybrid_smart_kasbon_status.sql` diterapkan hanya ke staging melalui `supabase db query --remote=unkmykhwddwhbtuioqrg`. Query read-only memverifikasi kolom status/count/exclusion/error baru dan fungsi aktivasi dengan guard schema, threshold, kelas, metrik, dan baseline. Versi `202611170001` tercatat di `supabase_migrations.schema_migrations` dengan `statements` kosong.
+- **Batas tooling:** `supabase db push --dry-run` dan `supabase migration repair` resmi gagal karena PostgreSQL staging menolak password koneksi (`SQLSTATE 28P01`). Karena itu bukan dry-run/repair CLI yang berhasil; SQL diterapkan melalui Management API dan pencatatan history dilakukan manual setelah verifikasi object, lalu history dibaca ulang. Ganti/tinjau pencatatan manual dengan `migration repair` resmi bila password DB yang sah tersedia.
+- Edge Function `smart-kasbon` aktif versi **6**, `verify_jwt=true`, ref staging. Function list memastikan hanya function ini yang berubah pada deployment hybrid. Probe tanpa JWT menjawab HTTP **401**, sesuai autentikasi wajib.
+- Query staging read-only menunjukkan **0 kasbon, 0 pembayaran, 0 model, 0 model aktif**. Maka status aktual toko adalah Rule-Based; tidak ada kandidat, artifact, metrik, atau klaim performa ML.
+- `.env.local` yang tersedia tidak cocok dengan project staging yang disetujui, sehingga akun/password di dalamnya tidak digunakan dan tidak ditampilkan. Akibatnya owner/assistant dashboard terautentikasi dan positive inference live belum diuji. Tidak ada akun, kasbon, pembayaran, atau email fixture yang dibuat.
+
+### Status implementasi
+
+**Hybrid Rule-Based + ML sudah terpasang pada backend staging; ML sengaja belum aktif karena dataset nyata kosong.** Build/test, migration object, function deployment, serta fallback/pipeline pada level unit sudah lolos. Rule-Based tetap satu-satunya metode yang dipakai staging sampai transaksi historis nyata memenuhi threshold, kandidat lulus holdout independen, dan owner mengaktifkannya. Frontend source yang baru telah dibangun secara lokal; hasil penyajian Render dan UI terautentikasi masih menunggu verifikasi setelah push.
