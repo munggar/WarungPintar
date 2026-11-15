@@ -31,6 +31,7 @@ function createClients({
     async rpc(name, payload) {
       calls.push({ type: 'rpc', name, payload });
       if (name === 'consume_owner_registration_attempt') return { data: registrationAllowed, error: null };
+      if (name === 'create_internal_owner_registration_invite') return { data: true, error: null };
       if (name === 'reserve_owner_registration_invite') return { data: 'legacy-reservation', error: null };
       if (name === 'complete_owner_registration_invite') return { data: true, error: null };
       if (name === 'release_owner_registration_invite') return { data: true, error: null };
@@ -81,7 +82,7 @@ test('validates owner registration without an administrator invite and ignores c
   assert.equal(validateOwnerRegistrationPayload({ ...validPayload, store_name: '' }).status, 400);
 });
 
-test('owner registration rate-limits, sets a server-only owner marker, and creates an immediate password session', async () => {
+test('owner registration rate-limits, creates a server-issued invite reservation, and returns an immediate password session', async () => {
   const parsed = validateOwnerRegistrationPayload(validPayload);
   const { admin, userClient, calls } = createClients();
 
@@ -101,16 +102,23 @@ test('owner registration rate-limits, sets a server-only owner marker, and creat
   assert.deepEqual(createCall.attributes.user_metadata, {
     store_name: 'Warung A',
     warungpintar_empty_vault: true,
+    owner_invite_reservation_id: 'legacy-reservation',
   });
-  assert.deepEqual(createCall.attributes.app_metadata, {
-    warungpintar_account_type: 'owner',
-  });
+  assert.equal(Object.hasOwn(createCall.attributes, 'app_metadata'), false);
   assert.equal(createCall.attributes.email_confirm, true);
-  assert.deepEqual(calls.map((call) => call.type), ['rpc', 'createUser', 'signInWithPassword']);
+  assert.deepEqual(calls.map((call) => call.type), ['rpc', 'rpc', 'rpc', 'createUser', 'rpc', 'signInWithPassword']);
   assert.deepEqual(calls.filter((call) => call.type === 'rpc').map((call) => call.name), [
     'consume_owner_registration_attempt',
+    'create_internal_owner_registration_invite',
+    'reserve_owner_registration_invite',
+    'complete_owner_registration_invite',
   ]);
-  assert.equal(calls.filter((call) => call.type === 'rpc').some((call) => call.name.includes('owner_invite')), false);
+  const internalInviteCall = calls.find((call) => call.name === 'create_internal_owner_registration_invite');
+  assert.match(internalInviteCall.payload.p_token_hash, /^[0-9a-f]{64}$/);
+  const reservationCall = calls.find((call) => call.name === 'reserve_owner_registration_invite');
+  const tokenDigest = new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(reservationCall.payload.p_token)));
+  const tokenHash = [...tokenDigest].map((byte) => byte.toString(16).padStart(2, '0')).join('');
+  assert.equal(internalInviteCall.payload.p_token_hash, tokenHash);
 });
 
 test('owner registration rate limit blocks Auth user creation', async () => {
