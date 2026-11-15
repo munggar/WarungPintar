@@ -59,7 +59,7 @@ const S = {
   cart: [], q: '', metode: 'tunai', terima: '', custId: '', jt: '', checkoutInProgress: false,
   processingDebtIds: new Set(),
   smartKasbon: null, smartKasbonLoading: false, smartKasbonMutationInProgress: false, smartKasbonError: '',
-  smartKasbonQuote: null, smartKasbonQuoteLoading: false, smartKasbonQuoteError: '',
+  smartKasbonQuote: null, smartKasbonQuoteLoading: false, smartKasbonQuoteRefreshing: false, smartKasbonQuoteError: '',
   qrisPreview: '', qrisFile: null, qrisStorageError: '',
   receipt: null, oneTimeCode: null,
   recentSalesLimit: 20,
@@ -177,36 +177,110 @@ async function prepareSmartKasbonBackend(expected) {
     await setCfg('smartKasbonBootstrapDone', true);
   }
   assertSmartKasbonContext(expected);
-  await cloud.smartKasbon('sync_finance', {
-    financial_snapshot: L.smartKasbonFinancialSnapshot(S),
-  });
+  const financialSnapshot = L.smartKasbonFinancialSnapshot(S);
+  await cloud.smartKasbon('sync_finance', { financial_snapshot: financialSnapshot });
+  smartKasbonFinanceSnapshotKey = `${expected.storeId}:${JSON.stringify(financialSnapshot)}`;
 }
 
 let smartKasbonQuotePromise = null;
 let smartKasbonQuoteRequestKey = null;
+let smartKasbonQuotePollTimer = null;
+let smartKasbonFinanceSyncTimer = null;
+let smartKasbonFinanceSyncPromise = null;
+let smartKasbonFinanceSnapshotKey = '';
 
-async function fetchSmartKasbonQuote(customerId, force = false) {
+function isKasbonQuoteScreenActive() {
+  return Boolean(S.account && S.metode === 'kasbon' && S.custId
+    && location.hash.replace(/^#\/?/, '') === 'kasir');
+}
+
+function syncKasbonQuoteAutoRefresh() {
+  if (!isKasbonQuoteScreenActive()) {
+    if (smartKasbonQuotePollTimer) clearInterval(smartKasbonQuotePollTimer);
+    smartKasbonQuotePollTimer = null;
+    return;
+  }
+  if (smartKasbonQuotePollTimer) return;
+  smartKasbonQuotePollTimer = setInterval(() => {
+    if (!isKasbonQuoteScreenActive()) {
+      syncKasbonQuoteAutoRefresh();
+      return;
+    }
+    if (document.visibilityState !== 'visible' || !navigator.onLine) return;
+    void fetchSmartKasbonQuote(S.custId, true, false);
+  }, 5000);
+}
+
+async function syncSmartKasbonFinanceSnapshot() {
+  const expected = cloud.currentContext();
+  if (!expected || expected.role !== 'owner' || !navigator.onLine) return false;
+  if (smartKasbonFinanceSyncPromise) return smartKasbonFinanceSyncPromise;
+  const request = (async () => {
+    await load();
+    assertSmartKasbonContext(expected);
+    const snapshot = L.smartKasbonFinancialSnapshot(S);
+    const snapshotKey = `${expected.storeId}:${JSON.stringify(snapshot)}`;
+    if (snapshotKey === smartKasbonFinanceSnapshotKey) return false;
+
+    if (S.cfg.smartKasbonBootstrapDone !== true
+      || S.cfg.smartKasbonResetPending || S.cfg.smartKasbonClearPending) {
+      await prepareSmartKasbonBackend(expected);
+    } else {
+      await cloud.smartKasbon('sync_finance', { financial_snapshot: snapshot });
+      assertSmartKasbonContext(expected);
+      smartKasbonFinanceSnapshotKey = snapshotKey;
+    }
+
+    if (isKasbonQuoteScreenActive()) void fetchSmartKasbonQuote(S.custId, true, false);
+    return true;
+  })().finally(() => {
+    if (smartKasbonFinanceSyncPromise === request) smartKasbonFinanceSyncPromise = null;
+  });
+  smartKasbonFinanceSyncPromise = request;
+  return request;
+}
+
+function scheduleSmartKasbonFinanceSync() {
+  const expected = cloud.currentContext();
+  if (!expected || expected.role !== 'owner' || !navigator.onLine) return;
+  clearTimeout(smartKasbonFinanceSyncTimer);
+  smartKasbonFinanceSyncTimer = setTimeout(() => {
+    void syncSmartKasbonFinanceSnapshot().catch((error) => {
+      console.warn('Smart Kasbon financial snapshot sync failed', error);
+    });
+  }, 1200);
+}
+
+async function fetchSmartKasbonQuote(customerId, force = false, refreshFinance = true) {
   const expected = cloud.currentContext();
   if (!customerId || !expected) {
     S.smartKasbonQuote = null;
     S.smartKasbonQuoteError = '';
     S.smartKasbonQuoteLoading = false;
+    S.smartKasbonQuoteRefreshing = false;
     renderCart();
     return null;
   }
   const requestKey = `${expected.userId}:${expected.storeId}:${customerId}`;
   if (!force && S.smartKasbonQuote?.requestKey === requestKey
-    && Date.now() - S.smartKasbonQuote.loadedAt < 30000) return S.smartKasbonQuote;
+    && Date.now() - S.smartKasbonQuote.loadedAt < 5000) return S.smartKasbonQuote;
   if (smartKasbonQuotePromise && smartKasbonQuoteRequestKey === requestKey) return smartKasbonQuotePromise;
 
-  S.smartKasbonQuote = null;
+  const hasCurrentQuote = S.smartKasbonQuote?.requestKey === requestKey;
   S.smartKasbonQuoteError = '';
-  S.smartKasbonQuoteLoading = true;
+  S.smartKasbonQuoteLoading = !hasCurrentQuote;
+  S.smartKasbonQuoteRefreshing = hasCurrentQuote;
   renderCart();
 
   const request = (async () => {
     try {
-      await prepareSmartKasbonBackend(expected);
+      if (refreshFinance && expected.role === 'owner') {
+        await load();
+        assertSmartKasbonContext(expected);
+        await prepareSmartKasbonBackend(expected);
+      } else if (refreshFinance) {
+        await prepareSmartKasbonBackend(expected);
+      }
       assertSmartKasbonContext(expected);
       const pseudonymousCustomerId = await L.pseudonymousUuid('customer', customerId, expected.storeId);
       const quote = await cloud.smartKasbon('quote', { customer_id: pseudonymousCustomerId });
@@ -229,6 +303,7 @@ async function fetchSmartKasbonQuote(customerId, force = false) {
       if (S.metode === 'kasbon' && S.custId === customerId
         && cloud.currentContext()?.storeId === expected.storeId) {
         S.smartKasbonQuoteLoading = false;
+        S.smartKasbonQuoteRefreshing = false;
         renderCart();
       }
     }
@@ -237,6 +312,15 @@ async function fetchSmartKasbonQuote(customerId, force = false) {
   smartKasbonQuoteRequestKey = requestKey;
   return request;
 }
+
+function refreshKasbonQuoteOnResume() {
+  if (isKasbonQuoteScreenActive() && navigator.onLine && document.visibilityState === 'visible') {
+    void fetchSmartKasbonQuote(S.custId, true, true);
+  }
+}
+window.addEventListener('focus', refreshKasbonQuoteOnResume);
+window.addEventListener('online', refreshKasbonQuoteOnResume);
+document.addEventListener('visibilitychange', refreshKasbonQuoteOnResume);
 
 async function fetchSmartKasbon(force = false) {
   const expected = cloud.currentContext();
@@ -498,12 +582,16 @@ async function activateAccount(account, { syncRemote = false, rememberDevice = t
     S.cfg.toko = S.account.storeName;
     await db.put('settings', { key: 'toko', value: S.account.storeName });
   }
-  db.setMutationListener(cloud.scheduleSync);
+  db.setMutationListener(() => {
+    cloud.scheduleSync();
+    scheduleSmartKasbonFinanceSync();
+  });
   cloud.onSyncStatus(({ message, state }) => {
     const el = $('#sync');
     if (!el || !S.account) return;
     el.textContent = message;
     el.className = 'chip ' + (state === 'ok' ? 'ok' : state === 'loading' ? 'loading' : 'warn');
+    if (state === 'ok' && message === 'Tersinkron ke cloud') scheduleSmartKasbonFinanceSync();
   });
   cloud.onSyncError((error) => toast('Sinkronisasi tidak berhasil: ' + error.message, 'err'));
   cloud.startAutoSync();
@@ -893,22 +981,27 @@ function renderCart() {
     ? '<p class="muted small">Pilih pelanggan untuk melihat batas kasbon yang dapat diajukan.</p>'
     : S.smartKasbonQuoteLoading
       ? '<p class="muted small kasbon-limit-loading">Sedang menghitung batas kasbon pelanggan…</p>'
-      : S.smartKasbonQuoteError
-        ? `<p class="err">${esc(S.smartKasbonQuoteError)}</p>`
-        : quoteMatchesCustomer
-          ? `<section class="kasbon-limit-card" aria-live="polite">
-              <span class="muted small">Maksimal kasbon yang bisa diajukan</span>
-              <strong>${rp(quoteAmount)}</strong>
-              <div class="kasbon-limit-meta">
-                <span>Sisa limit pelanggan: <b>${rp(selectedQuote.customer_remaining)}</b></span>
-                <span>Sisa kapasitas toko: <b>${rp(selectedQuote.shop_remaining)}</b></span>
-              </div>
-              ${quoteAmount <= 0 ? '<p class="err small">Kasbon belum dapat diajukan berdasarkan kondisi toko atau riwayat pelanggan.</p>' : total > quoteAmount ? `<p class="err small">Total keranjang ${rp(total)} melebihi batas yang tersedia ${rp(quoteAmount)}.</p>` : '<p class="muted small">Total keranjang masih dalam batas kasbon yang tersedia.</p>'}
-            </section>`
+      : quoteMatchesCustomer
+        ? `<section class="kasbon-limit-card" aria-live="polite">
+            <span class="muted small">Maksimal kasbon yang bisa diajukan</span>
+            <strong>${rp(quoteAmount)}</strong>
+            <div class="kasbon-limit-meta">
+              <span>Sisa limit pelanggan: <b>${rp(selectedQuote.customer_remaining)}</b></span>
+              <span>Sisa kapasitas toko: <b>${rp(selectedQuote.shop_remaining)}</b></span>
+            </div>
+            ${S.smartKasbonQuoteError
+              ? `<p class="err small">Pembaruan limit gagal: ${esc(S.smartKasbonQuoteError)}. Transaksi dikunci sampai limit berhasil diperiksa ulang.</p>`
+              : S.smartKasbonQuoteRefreshing
+                ? '<p class="muted small">Memperbarui limit…</p>'
+                : `<p class="muted small">Diperbarui pukul ${new Date(selectedQuote.loadedAt).toLocaleTimeString('id-ID')} · pembaruan otomatis setiap 5 detik</p>`}
+            ${quoteAmount <= 0 ? '<p class="err small">Kasbon belum dapat diajukan berdasarkan kondisi toko atau riwayat pelanggan.</p>' : total > quoteAmount ? `<p class="err small">Total keranjang ${rp(total)} melebihi batas yang tersedia ${rp(quoteAmount)}.</p>` : '<p class="muted small">Total keranjang masih dalam batas kasbon yang tersedia.</p>'}
+          </section>`
+        : S.smartKasbonQuoteError
+          ? `<p class="err">${esc(S.smartKasbonQuoteError)}</p>`
           : '<p class="muted small">Memuat batas kasbon pelanggan…</p>';
   const kasbonCheckoutBlocked = S.metode === 'kasbon'
-    && (!S.custId || S.smartKasbonQuoteLoading || !quoteMatchesCustomer || S.smartKasbonQuoteError
-      || total > quoteAmount || quoteAmount <= 0);
+    && (!S.custId || S.smartKasbonQuoteLoading || S.smartKasbonQuoteRefreshing
+      || !quoteMatchesCustomer || S.smartKasbonQuoteError || total > quoteAmount || quoteAmount <= 0);
   box.innerHTML = `
     <h2>Keranjang</h2>
     ${S.cart.length ? `<ul class="plain">${rows}</ul>` : '<p class="muted">Pilih produk untuk memulai transaksi.</p>'}
@@ -948,6 +1041,7 @@ function renderCart() {
   updateKembali();
   renderPendingQris();
   renderRecentSales();
+  syncKasbonQuoteAutoRefresh();
 }
 function updateKembali() {
   const el = $('#kembali'); if (!el) return;
@@ -988,7 +1082,7 @@ function updateCartQuantityInput(input, commit = false) {
     const limit = Math.max(0, Number(quote?.max_new_loan) || 0);
     checkoutButton.disabled = !S.cart.length || S.checkoutInProgress
       || (S.metode === 'qris' && (!S.cfg.qrisImage || Boolean(S.qrisPreview)))
-      || (S.metode === 'kasbon' && (!quote || S.smartKasbonQuoteLoading
+      || (S.metode === 'kasbon' && (!quote || S.smartKasbonQuoteLoading || S.smartKasbonQuoteRefreshing
         || Boolean(S.smartKasbonQuoteError) || cartTotal() > limit || limit <= 0));
   }
   updateKembali();
