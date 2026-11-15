@@ -31,6 +31,21 @@ test('Kasbon payment uses the field expected by the backend UUID validator', asy
   assert.ok(app.includes("'payment', { payment: backendPayment }"));
 });
 
+test('Kasir shows a customer-specific server quote before enabling kasbon checkout', async () => {
+  const [app, edge] = await Promise.all([
+    read('../js/app.js'), read('../supabase/functions/smart-kasbon/index.ts'),
+  ]);
+  assert.ok(app.includes('Maksimal kasbon yang bisa diajukan'));
+  assert.ok(app.includes("fetchSmartKasbonQuote(S.custId, true)"));
+  assert.ok(app.includes("cloud.smartKasbon('quote', { customer_id: pseudonymousCustomerId })"));
+  assert.ok(app.includes('total > quoteAmount'));
+  assert.ok(edge.includes("if (action === 'quote')"));
+  assert.ok(edge.includes("admin.rpc('smart_kasbon_evaluate'"));
+  assert.ok(edge.includes('max_new_loan: maxNewLoan'));
+  assert.ok(edge.includes('customer_remaining: customerRemaining'));
+  assert.ok(edge.includes('shop_remaining: shopRemaining'));
+});
+
 test('global process preload is accessible and used by async and Supabase operations', async () => {
   const [app, html, css, supabase] = await Promise.all([
     read('../js/app.js'), read('../index.html'), read('../css/style.css'), read('../js/supabase.js'),

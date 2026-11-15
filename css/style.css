@@ -198,6 +198,13 @@ ul { margin: 0; padding: 0; list-style: none; }
 .qris-upload-preview { margin-top: 14px; padding-top: 12px; border-top: 1px dashed var(--garis); }
 .qris-payment { margin: 12px 0; padding: 12px; border: 1px solid var(--garis); border-radius: var(--r); text-align: center; }
 .qris-payment p { margin: 8px 0; }
+.kasbon-limit-card { margin: 10px 0 12px; padding: 12px; border: 1px solid var(--garis); border-left: 4px solid var(--biru); border-radius: var(--r); background: #f4f7ff; display: grid; gap: 6px; }
+.kasbon-limit-card > strong { color: var(--biru); font-size: 1.5rem; font-variant-numeric: tabular-nums; }
+.kasbon-limit-meta { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; font-size: .84rem; }
+.kasbon-limit-meta span { display: grid; gap: 2px; color: var(--abu); }
+.kasbon-limit-meta b { color: var(--tinta); font-variant-numeric: tabular-nums; }
+.kasbon-limit-card p { margin: 2px 0 0; }
+.kasbon-limit-loading { padding: 8px 0; }
 .transfer-payment { margin: 12px 0; padding: 12px; border: 1px solid var(--garis); border-radius: var(--r); background: #f8f9fd; }
 .transfer-payment h3 { margin-top: 0; }
 .bank-account { display: flex; align-items: center; gap: 12px; margin: 10px 0; min-width: 0; }

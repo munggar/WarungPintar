@@ -353,7 +353,41 @@ Deno.serve(async (request) => {
     }
 
     let result: unknown;
-    if (action === 'dashboard') {
+    if (action === 'quote') {
+      const customerId = uuid(payload.customer_id, 'ID pelanggan');
+      const { data: evaluation, error: evaluationError } = await admin.rpc('smart_kasbon_evaluate', {
+        p_store_id: storeId,
+        p_customer_id: customerId,
+        p_amount: 0,
+      });
+      if (evaluationError) throw evaluationError;
+      const limits = (evaluation?.limits ?? {}) as Record<string, unknown>;
+      const readAmount = (value: unknown) => {
+        const amount = Number(value ?? 0);
+        return Number.isSafeInteger(amount) && amount > 0 ? amount : 0;
+      };
+      const customerLimit = readAmount(limits.per_customer);
+      const customerBalance = readAmount(evaluation?.current_customer_balance);
+      const customerRemaining = Math.max(0, customerLimit - customerBalance);
+      const shopRemaining = readAmount(limits.remaining_receivable);
+      const snapshotFresh = evaluation?.metrics?.snapshot_fresh === true;
+      const maxNewLoan = snapshotFresh && evaluation?.health !== 'kritis'
+        ? Math.min(customerRemaining, shopRemaining)
+        : 0;
+      const reasons = Array.isArray(evaluation?.reasons) ? [...evaluation.reasons] : [];
+      if (!snapshotFresh) reasons.push('Ringkasan keuangan toko belum tersinkron atau sudah kedaluwarsa.');
+      result = {
+        customer_limit: customerLimit,
+        customer_balance: customerBalance,
+        customer_remaining: customerRemaining,
+        shop_remaining: shopRemaining,
+        max_new_loan: maxNewLoan,
+        health: evaluation?.health ?? 'cold_start',
+        risk: evaluation?.risk ?? 'sedang',
+        snapshot_fresh: snapshotFresh,
+        reasons,
+      };
+    } else if (action === 'dashboard') {
       const [policyResult, decisionsResult, modelsResult, activeModelResult, trainingStatusResult] = await Promise.all([
         admin.from('smart_kasbon_policies').select('*').eq('store_id', storeId).maybeSingle(),
         admin.from('smart_kasbon_decisions').select('id,loan_id,customer_id,action,approved,decision,created_at').eq('store_id', storeId).order('id', { ascending: false }).limit(20),
