@@ -1425,7 +1425,7 @@ async function payDebt(id) {
     const expected = cloud.currentContext();
     const paymentId = await L.pseudonymousUuid('payment', payment.id, expected?.storeId);
     const backendPayment = {
-      payment_id: paymentId,
+      id: paymentId,
       loan_id: await L.pseudonymousUuid('loan', id, expected?.storeId),
       amount: payment.jumlah,
     };
