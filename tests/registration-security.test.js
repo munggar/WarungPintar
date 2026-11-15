@@ -1,6 +1,7 @@
 import { readFile } from 'node:fs/promises';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { hashAccountCode } from '../supabase/functions/_shared/account-recovery-security.js';
 import {
   registerOwner,
   validateOwnerRegistrationPayload,
@@ -121,7 +122,7 @@ test('owner registration rate-limits, reserves a server-issued one-time invite, 
   const reservation = calls.find((call) => call.name === 'reserve_owner_registration_invite');
   assert.equal(reservation.payload.p_email, 'owner@example.com');
   assert.match(reservation.payload.p_token, /^[0-9a-f]{64}$/);
-  assert.equal(internalInvite.payload.p_token_hash.length, 64);
+  assert.equal(internalInvite.payload.p_token_hash, await hashAccountCode(reservation.payload.p_token));
 });
 
 test('owner registration rate limit blocks Auth user creation', async () => {
