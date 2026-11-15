@@ -270,8 +270,9 @@ function moduleScriptSources(html) {
   return sources;
 }
 
-export async function verifyJavaScriptDependencies(outputDir, files) {
+export async function verifyJavaScriptDependencies(outputDir, files, { optionalDependencies = [] } = {}) {
   const normalizedFiles = new Set(files.map(toPosixPath));
+  const optionalDependencySet = new Set(optionalDependencies.map(toPosixPath));
   const html = await readFile(path.join(outputDir, 'index.html'), 'utf8');
   const scriptSources = moduleScriptSources(html);
   if (scriptSources.length === 0) fail('index.html tidak memiliki entrypoint JavaScript module.');
@@ -299,7 +300,7 @@ export async function verifyJavaScriptDependencies(outputDir, files) {
       const dependency = resolveLocalModulePath(importer, reference.specifier);
       if (!dependency) continue;
       if (!normalizedFiles.has(dependency)) {
-        if (isOptionalLocalConfigReference(importer, reference)) continue;
+        if (optionalDependencySet.has(dependency) || isOptionalLocalConfigReference(importer, reference)) continue;
         fail(`Dependensi JavaScript lokal tidak ditemukan: ${dependency} (dari ${importer}).`);
       }
       if (dependency.endsWith('.js')) queue.push(dependency);

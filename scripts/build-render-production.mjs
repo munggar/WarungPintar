@@ -123,7 +123,7 @@ export async function verifyProductionOutput(outputDir) {
   if (supabaseTargets.size !== 1 || !supabaseTargets.has(config.projectRef)) {
     fail('Target Supabase dalam artefak production tidak tunggal atau tidak sesuai.');
   }
-  await verifyJavaScriptDependencies(outputDir, files);
+  await verifyJavaScriptDependencies(outputDir, files, { optionalDependencies: ['js/config.runtime.js'] });
   await verifyStaticAssetReferences(outputDir, files);
   return { environment: 'production', projectRef: config.projectRef, buildId };
 }
