@@ -57,6 +57,9 @@ Deno.serve(async (request) => {
       p_invited_by: user.id,
       p_code_hash: codeHash,
     });
+    if (inviteError?.code === '23505') {
+      return Response.json({ error: 'Kode undangan sudah pernah digunakan. Pilih kode yang berbeda.' }, { status: 409, headers });
+    }
     if (inviteError) throw inviteError;
     if (!Array.isArray(invite) || !invite[0]?.expires_at) throw new Error('Database tidak mengembalikan masa berlaku undangan.');
     return Response.json({ invitation_code: code, expires_at: invite[0].expires_at }, { headers });
