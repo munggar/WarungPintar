@@ -6,11 +6,19 @@ import * as supabase from './supabase.js';
 import * as cloud from './cloud-sync.js';
 import { bindRupiahInput, formatRupiahInput, parseRupiahInput } from './currency.js';
 import { receiptJpeg, receiptPdf, renderReceiptCanvas } from './receipt.js';
+import { ENVIRONMENT } from './config.js';
 
 /* ============ Utilitas ============ */
 const $ = (s, r = document) => r.querySelector(s);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-const uid = () => (crypto.randomUUID ? crypto.randomUUID() : Date.now().toString(36) + Math.random().toString(36).slice(2));
+const uid = () => {
+  if (crypto.randomUUID) return crypto.randomUUID();
+  const bytes = crypto.getRandomValues(new Uint8Array(16));
+  bytes[6] = (bytes[6] & 0x0f) | 0x40;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  const hex = [...bytes].map((byte) => byte.toString(16).padStart(2, '0')).join('');
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+};
 const rp = L.rupiah;
 const fmtDate = (d) => new Date(d).toLocaleDateString('id-ID', { day: 'numeric', month: 'short', year: 'numeric' });
 const fmtTime = (d) => new Date(d).toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' });
@@ -25,8 +33,9 @@ const S = {
   cfg: {}, role: 'owner', account: null, authMode: 'login', authFlow: null, authMessage: '', authEmail: '',
   cart: [], q: '', metode: 'tunai', terima: '', custId: '', jt: '', checkoutInProgress: false,
   processingDebtIds: new Set(),
+  smartKasbon: null, smartKasbonCustomerNames: {}, smartKasbonLoading: false, smartKasbonMutationInProgress: false, smartKasbonError: '',
   qrisPreview: '', qrisFile: null, qrisStorageError: '',
-  receipt: null,
+  receipt: null, oneTimeCode: null,
   recentSalesLimit: 20,
   rep: { preset: 'bulan', from: L.ymd(new Date()), to: L.ymd(new Date()) }, showLunas: false,
 };
@@ -68,6 +77,237 @@ async function load() {
   S.role = S.account?.role || 'owner';
 }
 const setCfg = (key, value) => { S.cfg[key] = value; return db.put('settings', { key, value }); };
+
+let smartKasbonLoadPromise = null;
+let smartKasbonLoadContextKey = null;
+let smartKasbonLastLoad = 0;
+let smartKasbonContextKey = null;
+function assertSmartKasbonContext(expected) {
+  const current = cloud.currentContext();
+  if (!expected || !current || current.storeId !== expected.storeId || current.userId !== expected.userId) {
+    throw new Error('Akun atau toko berubah. Ulangi tindakan Smart Kasbon dari akun aktif.');
+  }
+}
+
+async function smartKasbonBootstrapData(storeId) {
+  const loans = await Promise.all(S.debts.map(async (debt) => ({
+    id: await L.pseudonymousUuid('loan', debt.id, storeId),
+    customer_id: await L.pseudonymousUuid('customer', debt.customerId || `unknown:${debt.id}`, storeId),
+    amount: debt.jumlah,
+    due_date: L.ymd(debt.jatuhTempo),
+    ...((debt.createdAt || S.sales.find((sale) => sale.id === debt.saleId)?.waktu)
+      ? { created_at: debt.createdAt || S.sales.find((sale) => sale.id === debt.saleId).waktu }
+      : {}),
+  })));
+  const debtIds = new Set(S.debts.map((debt) => debt.id));
+  const payments = await Promise.all(S.payments.map(async (payment) => {
+    if (!debtIds.has(payment.debtId)) throw new Error('Riwayat pembayaran kasbon tidak memiliki kasbon terkait.');
+    return {
+      id: await L.pseudonymousUuid('payment', payment.id, storeId),
+      loan_id: await L.pseudonymousUuid('loan', payment.debtId, storeId),
+      amount: payment.jumlah,
+      paid_at: new Date(payment.waktu).toISOString(),
+    };
+  }));
+  payments.sort((left, right) => left.paid_at.localeCompare(right.paid_at));
+  return { loans, payments };
+}
+
+async function prepareSmartKasbonBackend(expected) {
+  assertSmartKasbonContext(expected);
+  if (!navigator.onLine) throw new Error('Smart Kasbon memerlukan koneksi internet.');
+  if (expected.role !== 'owner') return;
+  if (S.cfg.smartKasbonResetPending) {
+    assertSmartKasbonContext(expected);
+    await cloud.smartKasbon('clear_history', { reset_policy: true });
+    assertSmartKasbonContext(expected);
+    await setCfg('smartKasbonResetPending', false);
+    await setCfg('smartKasbonClearPending', false);
+    await setCfg('smartKasbonBootstrapDone', false);
+  } else if (S.cfg.smartKasbonClearPending) {
+    assertSmartKasbonContext(expected);
+    await cloud.smartKasbon('clear_history');
+    assertSmartKasbonContext(expected);
+    await setCfg('smartKasbonClearPending', false);
+    await setCfg('smartKasbonBootstrapDone', false);
+  }
+  if (!S.cfg.smartKasbonBootstrapDone) {
+    const history = await smartKasbonBootstrapData(expected.storeId);
+    const batches = [];
+    for (let index = 0; index < history.loans.length; index += 500) {
+      batches.push({ loans: history.loans.slice(index, index + 500), payments: [] });
+    }
+    for (let index = 0; index < history.payments.length; index += 2000) {
+      batches.push({ loans: [], payments: history.payments.slice(index, index + 2000) });
+    }
+    if (!batches.length) batches.push({ loans: [], payments: [] });
+    for (let index = 0; index < batches.length; index++) {
+      assertSmartKasbonContext(expected);
+      await cloud.smartKasbon('bootstrap', {
+        snapshot: { ...batches[index], finalize: index === batches.length - 1 },
+      });
+    }
+    assertSmartKasbonContext(expected);
+    await setCfg('smartKasbonBootstrapDone', true);
+  }
+  assertSmartKasbonContext(expected);
+  await cloud.smartKasbon('sync_finance', {
+    financial_snapshot: L.smartKasbonFinancialSnapshot(S),
+  });
+}
+
+async function fetchSmartKasbon(force = false) {
+  const expected = cloud.currentContext();
+  const storeId = expected?.storeId;
+  const contextKey = expected ? `${expected.userId}:${expected.storeId}` : null;
+  if (contextKey !== smartKasbonContextKey) {
+    smartKasbonContextKey = contextKey;
+    smartKasbonLastLoad = 0;
+    S.smartKasbon = null;
+    S.smartKasbonCustomerNames = {};
+  }
+  if (smartKasbonLoadPromise && smartKasbonLoadContextKey === contextKey) return smartKasbonLoadPromise;
+  if (!force && Date.now() - smartKasbonLastLoad < 60000) return;
+  const loadPromise = (async () => {
+    await Promise.resolve();
+    smartKasbonLastLoad = Date.now();
+    S.smartKasbonLoading = true;
+    S.smartKasbonError = '';
+    try {
+      if (!expected || !navigator.onLine) throw new Error('Dashboard Smart Kasbon memerlukan koneksi internet.');
+      await prepareSmartKasbonBackend(expected);
+      assertSmartKasbonContext(expected);
+      const dashboard = await cloud.smartKasbon('dashboard');
+      assertSmartKasbonContext(expected);
+      S.smartKasbon = dashboard;
+      const customerNames = await Promise.all(S.customers.map(async (customer) => [
+        await L.pseudonymousUuid('customer', customer.id, storeId), customer.nama,
+      ]));
+      assertSmartKasbonContext(expected);
+      S.smartKasbonCustomerNames = Object.fromEntries(customerNames);
+    } catch (error) {
+      const current = cloud.currentContext();
+      if (current?.userId === expected?.userId && current.storeId === storeId) {
+        S.smartKasbonError = error.message || 'Gagal memuat Smart Kasbon.';
+      }
+    } finally {
+      const current = cloud.currentContext();
+      if (current?.userId === expected?.userId && current.storeId === storeId) {
+        S.smartKasbonLoading = false;
+        if (location.hash.replace(/^#\/?/, '') === 'kasbon' && S.account) render();
+      }
+      if (smartKasbonLoadPromise === loadPromise) {
+        smartKasbonLoadPromise = null;
+        smartKasbonLoadContextKey = null;
+      }
+    }
+  })();
+  smartKasbonLoadPromise = loadPromise;
+  smartKasbonLoadContextKey = contextKey;
+  return smartKasbonLoadPromise;
+}
+
+function mKasbon() {
+  if (!S.smartKasbonLoading && Date.now() - smartKasbonLastLoad >= 60000) void fetchSmartKasbon();
+}
+
+async function authorizeSmartKasbonLoan(debt, expected) {
+  await prepareSmartKasbonBackend(expected);
+  assertSmartKasbonContext(expected);
+  const loanId = await L.pseudonymousUuid('loan', debt.id, expected.storeId);
+  const customerId = await L.pseudonymousUuid('customer', debt.customerId, expected.storeId);
+  assertSmartKasbonContext(expected);
+  const payload = {
+    loan: {
+      id: loanId,
+      customer_id: customerId,
+      amount: debt.jumlah,
+      due_date: L.ymd(debt.jatuhTempo),
+    },
+    'copy-one-time-code': async () => {
+      if (!S.oneTimeCode) throw new Error('Kode sekali pakai tidak tersedia.');
+      await navigator.clipboard.writeText(S.oneTimeCode.code);
+      toast('Kode sekali pakai disalin ke papan klip.');
+    },
+    'download-one-time-code': () => {
+      if (!S.oneTimeCode) throw new Error('Kode sekali pakai tidak tersedia.');
+      downloadFile(S.oneTimeCode.filename, 'text/plain;charset=utf-8', `${S.oneTimeCode.title}\n\n${S.oneTimeCode.code}\n\nSimpan secara aman. Kode hanya ditampilkan sekali.\n`);
+    },
+    'confirm-one-time-code': () => {
+      S.oneTimeCodeDone?.();
+      S.oneTimeCode = null;
+      $('#dlg').close();
+    },
+  };
+  const decision = await smartKasbonMutationWithRetry(
+    'issue', payload, 'void_loan', { loan_id: loanId }, expected,
+  );
+  if (!decision?.approved) {
+    const reasons = Array.isArray(decision?.reasons) ? decision.reasons.join(' ') : '';
+    throw new Error(reasons || 'Kasbon ditolak oleh kebijakan Smart Kasbon.');
+  }
+  const prediction = decision.model_prediction;
+  if (prediction?.state === 'predicted') {
+    const outcome = prediction.prediction === 'on_time' ? 'indikasi risiko rendah'
+      : prediction.prediction === 'at_risk' ? 'indikasi risiko tinggi'
+        : 'indikasi belum dapat disimpulkan';
+    toast(prediction.method === 'machine_learning'
+      ? `Metode prediksi: Machine Learning · ${outcome} · model ${prediction.model_version}. Probabilitas ${pct(prediction.probability)}; advisory, bukan jaminan.`
+      : `Metode prediksi: Rule-Based · ${outcome}. ${prediction.explanation || prediction.reason} Rekomendasi advisory, bukan jaminan.`);
+  }
+  return loanId;
+}
+
+async function smartKasbonMutationWithRetry(action, payload, undoAction, undoPayload, expected) {
+  const send = () => {
+    assertSmartKasbonContext(expected);
+    return cloud.smartKasbon(action, payload);
+  };
+  try {
+    const result = await send();
+    assertSmartKasbonContext(expected);
+    return result;
+  } catch (error) {
+    if (!/tidak dapat terhubung ke server|network|failed to fetch/i.test(error.message || '')) throw error;
+    try {
+      const result = await send();
+      assertSmartKasbonContext(expected);
+      return result;
+    } catch (retryError) {
+      try {
+        assertSmartKasbonContext(expected);
+        await cloud.smartKasbon(undoAction, undoPayload);
+      } catch (compensationError) {
+        throw new Error(`Status ${action === 'issue' ? 'kasbon' : 'pembayaran'} belum dapat dipastikan dan pembatalan otomatis gagal. Jangan ulangi transaksi sebelum memeriksa dashboard Smart Kasbon. Detail: ${compensationError.message}`);
+      }
+      throw new Error(`Permintaan ${action === 'issue' ? 'kasbon' : 'pembayaran'} gagal dan perubahan server yang mungkin sudah tersimpan telah dibatalkan. ${retryError.message}`);
+    }
+  }
+}
+
+async function saveLocalWithLoanCompensation(debt, saveLocal) {
+  if (S.smartKasbonMutationInProgress || S.processingDebtIds.size) {
+    throw new Error('Transaksi Smart Kasbon lain sedang diproses.');
+  }
+  const expected = cloud.currentContext();
+  S.smartKasbonMutationInProgress = true;
+  try {
+    const loanId = await authorizeSmartKasbonLoan(debt, expected);
+    try {
+      await saveLocal();
+    } catch (error) {
+      try {
+        assertSmartKasbonContext(expected);
+        await cloud.smartKasbon('void_loan', { loan_id: loanId });
+      } catch (compensationError) {
+        throw new Error(`Kasbon tercatat di server, tetapi penyimpanan lokal gagal dan pembatalan otomatis juga gagal. Hubungi pemilik toko sebelum mencoba ulang. Detail: ${compensationError.message}`);
+      }
+      throw error;
+    }
+  } finally {
+    S.smartKasbonMutationInProgress = false;
+  }
+}
 async function setCfgMany(values) {
   Object.assign(S.cfg, values);
   await db.atomic(['settings'], (store) => {
@@ -78,29 +318,32 @@ async function setCfgMany(values) {
 function renderAuth(message = S.authMessage) {
   S.authMessage = message;
   $('#toko').textContent = 'WarungPintar';
-  $('#judul').textContent = S.authFlow?.invite ? 'Aktivasi akun asisten' : S.authFlow?.passwordRecovery ? 'Atur ulang kata sandi' : S.authMode === 'register' ? 'Pendaftaran pemilik' : 'Masuk';
+  $('#judul').textContent = S.authMode === 'register' ? 'Pendaftaran pemilik' : S.authMode === 'assistant' ? 'Pendaftaran asisten' : 'Masuk';
   $('#role').textContent = '';
   $('#sync').textContent = '';
   $('#sync').className = '';
   $('#nav').innerHTML = '';
-  const invited = Boolean(S.authFlow?.invite);
-  const reset = Boolean(S.authFlow?.passwordRecovery);
-  const formTitle = invited ? 'Buat kata sandi asisten' : reset ? 'Kata sandi baru' : S.authMode === 'register' ? 'Buat akun pemilik' : 'Masuk ke toko';
+  const assistant = S.authMode === 'assistant';
+  const registering = S.authMode === 'register' || assistant;
+  const formTitle = assistant ? 'Bergabung sebagai asisten' : registering ? 'Buat akun pemilik' : 'Masuk ke toko';
   const recovery = `<label class="field"><span>Kunci pemulihan (opsional)</span><input name="recovery" autocomplete="off" placeholder="Diperlukan setelah kata sandi diubah atau saat asisten membuka data"><small>Pemilik membagikan kunci pemulihan kepada asisten melalui saluran terpisah yang aman.</small></label>`;
   $('#view').innerHTML = `<section class="card auth-card">
     <h2>${formTitle}</h2>
     <p class="muted">${esc(message || 'Data bisnis dienkripsi sebelum disinkronkan ke server.')}</p>
     <form id="auth-form">
-      ${!invited && !reset ? `<label class="field"><span>Email</span><input name="email" type="email" value="${esc(S.authEmail)}" required autocomplete="email"></label>` : `<label class="field"><span>Email akun</span><input name="email" type="email" value="${esc(S.authFlow?.email || '')}" readonly></label>`}
-      ${S.authMode === 'register' && !invited && !reset ? '<label class="field"><span>Nama toko</span><input name="storeName" required maxlength="120" autocomplete="organization"></label>' : ''}
-      <label class="field"><span>${invited || reset ? 'Kata sandi baru' : 'Kata sandi'}</span><input name="password" type="password" required minlength="${S.authMode === 'register' || invited || reset ? '8' : '6'}" autocomplete="${invited || reset ? 'new-password' : 'current-password'}"><small>${S.authMode === 'register' || invited || reset ? 'Gunakan kata sandi baru minimal 8 karakter.' : 'Masukkan kata sandi akun Anda.'}</small></label>
-      ${(S.authMode === 'register' || invited || reset) ? '<label class="field"><span>Ulangi kata sandi</span><input name="confirmPassword" type="password" required minlength="8" autocomplete="new-password"></label>' : ''}
+      <label class="field"><span>Email</span><input name="email" type="email" value="${esc(S.authEmail)}" required autocomplete="email"></label>
+      ${S.authMode === 'register' ? '<label class="field"><span>Nama toko</span><input name="storeName" required maxlength="120" autocomplete="organization"></label>' : ''}
+      ${registering ? `<label class="field"><span>${assistant ? 'Kode undangan asisten' : 'Kode undangan pendaftaran'}</span><input name="inviteCode" required minlength="64" maxlength="64" pattern="[0-9A-Fa-f]{64}" autocomplete="off" spellcheck="false"><small>${assistant ? 'Masukkan kode yang diberikan pemilik toko. Kode hanya dapat dipakai sekali.' : 'Minta kode satu kali dari administrator WarungPintar.'}</small></label>` : ''}
+      <label class="field"><span>Kata sandi</span><input name="password" type="password" required minlength="${registering ? '8' : '6'}" autocomplete="${registering ? 'new-password' : 'current-password'}"><small>${registering ? 'Gunakan kata sandi minimal 8 karakter.' : 'Masukkan kata sandi akun Anda.'}</small></label>
+      ${registering ? '<label class="field"><span>Ulangi kata sandi</span><input name="confirmPassword" type="password" required minlength="8" autocomplete="new-password"></label>' : ''}
       ${recovery}
-      <button class="btn primary big" type="submit">${invited || reset ? 'Simpan kata sandi dan buka data' : S.authMode === 'register' ? 'Daftar' : 'Masuk'}</button>
-      ${cloud.hasOfflineAccount() && !invited && !reset && S.authMode === 'login' ? '<button class="btn big" type="button" data-act="offline-unlock">Buka data secara offline</button>' : ''}
+      <button class="btn primary big" type="submit">${assistant ? 'Buat akun asisten' : S.authMode === 'register' ? 'Daftar' : 'Masuk'}</button>
+      ${cloud.hasOfflineAccount() && S.authMode === 'login' ? '<button class="btn big" type="button" data-act="offline-unlock">Buka data secara offline</button>' : ''}
     </form>
-    ${!invited && !reset ? `<div class="row wrap auth-actions">${S.authMode === 'register' ? '<button class="btn ghost" data-act="auth-mode" data-mode="login">Sudah memiliki akun? Masuk</button>' : '<button class="btn ghost" data-act="auth-mode" data-mode="register">Daftarkan akun pemilik</button><button class="btn ghost" data-act="forgot">Lupa kata sandi?</button>'}</div>` : ''}
-    <p class="muted small auth-security">Sesi dan kunci pembuka data disimpan di perangkat ini agar Anda tidak perlu masuk kembali setiap kali membuka aplikasi. Hindari perangkat bersama. Tombol Keluar menghapus sesi tersimpan. Kunci pemulihan tidak disimpan di server.</p>
+    <div class="row wrap auth-actions">${S.authMode === 'login'
+      ? '<button class="btn ghost" data-act="auth-mode" data-mode="register">Daftarkan akun pemilik</button><button class="btn ghost" data-act="auth-mode" data-mode="assistant">Gunakan kode undangan asisten</button><button class="btn ghost" data-act="forgot">Pulihkan dengan kode akun</button>'
+      : '<button class="btn ghost" data-act="auth-mode" data-mode="login">Sudah memiliki akun? Masuk</button>'}</div>
+    <p class="muted small auth-security">Sesi dan kunci pembuka data disimpan di perangkat ini agar Anda tidak perlu masuk kembali setiap kali membuka aplikasi. Hindari perangkat bersama. Tombol Keluar menghapus sesi tersimpan. Kode pemulihan akun dan kunci pemulihan data adalah dua hal berbeda; simpan keduanya secara aman.</p>
   </section>`;
 }
 
@@ -112,6 +355,29 @@ async function showRecoveryCode(code) {
     dialog.addEventListener('close', () => { if (!done) resolve(false); }, { once: true });
     S.recoveryDialogDone = () => { done = true; resolve(true); };
     S.recoveryCode = code;
+  });
+}
+
+async function showOneTimeCode({ title, description, code, expiresAt, filename }) {
+  return new Promise((resolve) => {
+    let done = false;
+    const expires = expiresAt ? `<p class="muted small">Berlaku sampai ${esc(fmtDate(expiresAt))}. Kode hanya ditampilkan sekali.</p>` : '';
+    const dialog = openDialog(`<div class="dlg-body"><h2>${esc(title)}</h2><p>${esc(description)}</p><p class="recovery-code">${esc(code)}</p>${expires}<div class="row wrap"><button class="btn" data-act="copy-one-time-code">Salin kode</button><button class="btn" data-act="download-one-time-code">Unduh kode</button></div><button class="btn primary big" data-act="confirm-one-time-code">Saya sudah menyimpannya</button></div>`);
+    dialog.oncancel = (event) => event.preventDefault();
+    dialog.addEventListener('close', () => { if (!done) resolve(false); }, { once: true });
+    S.oneTimeCode = { code, filename, title };
+    S.oneTimeCodeDone = () => { done = true; resolve(true); };
+  });
+}
+
+async function issueInitialAccountRecoveryCode() {
+  const result = await supabase.issueAccountRecoveryCode();
+  await showOneTimeCode({
+    title: 'Simpan Account Recovery Code',
+    description: 'Gunakan kode ini hanya untuk mengatur ulang kata sandi akun. Kode ditampilkan sekali, tersimpan sebagai hash di server, dan tidak dapat digunakan untuk membuka data toko.',
+    code: result.recovery_code,
+    expiresAt: result.expires_at,
+    filename: 'warungpintar-account-recovery-code.txt',
   });
 }
 
@@ -172,7 +438,6 @@ async function activateAccount(account, { syncRemote = false, rememberDevice = t
 
 async function completeLogin(password, recoveryCode = '', options = {}) {
   const result = await cloud.connect(password, recoveryCode, options);
-  if (options.registeredEmail) supabase.clearNewRegistration(options.registeredEmail);
   if (result.recoveryCode && !(await showRecoveryCode(result.recoveryCode))) {
     await cloud.disconnect();
     S.authFlow = null;
@@ -200,34 +465,64 @@ async function submitAuth(form) {
   S.authEmail = email;
   const password = String(values.password || '');
   const recovery = String(values.recovery || '').trim();
-  if ((S.authMode === 'register' || S.authFlow?.invite || S.authFlow?.passwordRecovery) && password.length < 8) {
+  const registering = S.authMode === 'register' || S.authMode === 'assistant';
+  if (registering && password.length < 8) {
     return renderAuth('Kata sandi baru harus terdiri dari minimal 8 karakter.');
   }
   if (S.authMode === 'login' && password.length < 6) return renderAuth('Kata sandi harus terdiri dari minimal 6 karakter.');
-  if ((S.authMode === 'register' || S.authFlow?.invite || S.authFlow?.passwordRecovery) && password !== values.confirmPassword) {
+  if (registering && password !== values.confirmPassword) {
     return renderAuth('Kata sandi yang dimasukkan belum sama.');
   }
   try {
-    if (S.authFlow?.invite || S.authFlow?.passwordRecovery) {
-      await supabase.updatePassword(password);
-      S.authFlow = null;
-      return await completeLogin(password, recovery);
-    }
     if (S.authMode === 'register') {
-      const result = await supabase.register(email, password, String(values.storeName || '').trim());
-      if (!result?.access_token) {
+      const result = await supabase.register(
+        email,
+        password,
+        String(values.storeName || '').trim(),
+        String(values.inviteCode || '').trim(),
+      );
+      if (!result?.access_token || !result?.refresh_token) {
         S.authMode = 'login';
-        return renderAuth('Akun berhasil dibuat, tetapi sesi belum terbentuk. Pastikan Edge Function register-owner telah di-deploy ke proyek Supabase.');
+        return renderAuth('Pendaftaran belum memberikan sesi aktif. Coba masuk dengan email dan kata sandi; jika akun belum tersedia, ulangi pendaftaran.');
       }
-      await completeLogin(password, recovery, { startEmpty: true, registeredEmail: email });
+      let recoveryCodeUnavailable = false;
+      try {
+        await issueInitialAccountRecoveryCode();
+      } catch (error) {
+        console.error('Account Recovery Code awal tidak dapat diterbitkan:', error);
+        recoveryCodeUnavailable = true;
+      }
+      await completeLogin(password, recovery, { startEmpty: true });
+      if (recoveryCodeUnavailable) toast('Akun berhasil dibuat, tetapi Account Recovery Code belum terbit. Buat kode dari Pengaturan sebelum keluar.', 'err');
       return;
-    } else {
-      await supabase.login(email, password);
     }
-    const newRegistration = supabase.isNewRegistration(email);
-    await completeLogin(password, recovery, { startEmpty: newRegistration, registeredEmail: newRegistration ? email : '' });
+    if (S.authMode === 'assistant') {
+      const result = await supabase.acceptAssistant(email, password, String(values.inviteCode || '').trim());
+      if (!result?.access_token || !result?.refresh_token) {
+        S.authMode = 'login';
+        return renderAuth('Pendaftaran asisten belum memberikan sesi aktif. Silakan masuk dengan email dan kata sandi.');
+      }
+      let recoveryCodeUnavailable = false;
+      try {
+        await issueInitialAccountRecoveryCode();
+      } catch (error) {
+        console.error('Account Recovery Code awal tidak dapat diterbitkan:', error);
+        recoveryCodeUnavailable = true;
+      }
+      await completeLogin(password, recovery);
+      if (recoveryCodeUnavailable) toast('Akun berhasil dibuat, tetapi Account Recovery Code belum terbit. Buat kode dari Pengaturan sebelum keluar.', 'err');
+      return;
+    }
+    await supabase.login(email, password);
+    await completeLogin(password, recovery);
   } catch (error) {
     console.error(error);
+    if ((S.authMode === 'register' || S.authMode === 'assistant')
+      && error instanceof supabase.SupabaseRequestError
+      && ['registration_session_unavailable', 'registration_outcome_unknown'].includes(error.code)) {
+      S.authMode = 'login';
+      return renderAuth('Pendaftaran belum dapat dipastikan. Coba masuk; jika akun belum tersedia, ulangi pendaftaran setelah gangguan teratasi.');
+    }
     renderAuth('');
     toast(error.message, 'err');
   }
@@ -235,23 +530,35 @@ async function submitAuth(form) {
 
 async function beginPasswordReset() {
   const value = await formModal({
-    title: 'Atur ulang kata sandi',
-    note: 'Verifikasi dilakukan dengan kunci pemulihan. Tidak ada tautan atau verifikasi email.',
+    title: 'Pulihkan akun dengan kode',
+    note: 'Masukkan Account Recovery Code yang disimpan sebelumnya. Kode ini mengubah kata sandi akun; Kunci Pemulihan Data tetap diperlukan terpisah untuk membuka data toko terenkripsi.',
     fields: [
       { name: 'email', label: 'Email akun', type: 'email', required: true },
-      { name: 'recovery', label: 'Kunci pemulihan', required: true, autocomplete: 'off' },
-      { name: 'password', label: 'Kata sandi baru', type: 'password', required: true, minlength: 8 },
-      { name: 'confirmPassword', label: 'Ulangi kata sandi baru', type: 'password', required: true, minlength: 8 },
+      { name: 'recoveryCode', label: 'Account Recovery Code', required: true },
+      { name: 'password', label: 'Kata sandi baru', type: 'password', required: true },
+      { name: 'confirmPassword', label: 'Ulangi kata sandi baru', type: 'password', required: true },
+      { name: 'vaultRecoveryKey', label: 'Kunci Pemulihan Data (opsional)', hint: 'Hanya untuk membuka data toko terenkripsi; bukan kode pengubah kata sandi.' },
     ],
-    submit: 'Reset kata sandi',
+    submit: 'Atur kata sandi baru',
+    validate: (values) => values.recoveryCode.trim().length !== 64
+      ? 'Account Recovery Code harus berisi 64 karakter.'
+      : values.password.length < 8 || values.password.length > 128
+        ? 'Kata sandi harus terdiri dari 8 sampai 128 karakter.'
+        : values.password !== values.confirmPassword
+          ? 'Kata sandi yang dimasukkan belum sama.'
+          : null,
   });
   if (!value) return;
-  if (value.password !== value.confirmPassword) throw new Error('Kata sandi baru belum sama.');
-  await supabase.resetPassword(value.email.trim().toLowerCase(), value.recovery.trim(), value.password);
-  await supabase.login(value.email.trim().toLowerCase(), value.password);
-  S.authEmail = value.email.trim().toLowerCase();
-  await completeLogin(value.password, value.recovery.trim());
-  toast('Kata sandi berhasil direset.');
+  const email = value.email.trim().toLowerCase();
+  await supabase.resetPassword(email, value.recoveryCode.trim(), value.password);
+  S.authMode = 'login';
+  S.authEmail = email;
+  try {
+    await supabase.login(email, value.password);
+    await completeLogin(value.password, value.vaultRecoveryKey);
+  } catch (error) {
+    renderAuth('Kata sandi akun berhasil diubah. Masuk kembali dengan kata sandi baru dan Kunci Pemulihan Data untuk membuka data toko: ' + error.message);
+  }
 }
 
 function toast(msg, type = 'ok') {
@@ -300,7 +607,8 @@ function fieldHtml(f) {
   } else {
     const num = f.type === 'number';
     const currency = f.type === 'currency';
-    ctl = `<input ${common} type="${num ? 'number' : 'text'}"${num || currency ? ` inputmode="numeric"${num ? ` step="1"${f.min != null ? ` min="${f.min}"` : ''}` : ' data-currency'}` : ''} value="${esc(currency ? formatRupiahInput(f.value) : f.value ?? '')}"${f.placeholder ? ` placeholder="${esc(f.placeholder)}"` : ''} autocomplete="off">`;
+    const type = ['email', 'password'].includes(f.type) ? f.type : num ? 'number' : 'text';
+    ctl = `<input ${common} type="${type}"${num || currency ? ` inputmode="numeric"${num ? ` step="1"${f.min != null ? ` min="${f.min}"` : ''}` : ' data-currency'}` : ''} value="${esc(currency ? formatRupiahInput(f.value) : f.value ?? '')}"${f.placeholder ? ` placeholder="${esc(f.placeholder)}"` : ''} autocomplete="${type === 'password' ? 'new-password' : 'off'}">`;
   }
   return `<label class="field"><span>${esc(f.label)}</span>${ctl}${f.hint ? `<small>${esc(f.hint)}</small>` : ''}</label>`;
 }
@@ -353,9 +661,9 @@ const ROUTES = {
   produk: { title: 'Produk dan Stok', render: vProduk, mount: mProduk },
   belanja: { title: 'Belanja Barang', render: vBelanja },
   pengeluaran: { title: 'Pengeluaran', render: vPengeluaran },
-  kasbon: { title: 'Kasbon', render: vKasbon },
+  kasbon: { title: 'Kasbon', render: vKasbon, mount: mKasbon },
   laporan: { title: 'Laporan', render: vLaporan },
-  zakat: { title: 'Zakat Usaha', render: vZakat },
+  zakat: { title: 'Zakat Usaha', render: vZakat, mount: mZakat },
   pengaturan: { title: 'Pengaturan', render: vPengaturan },
   menu: { title: 'Menu', render: vMenu },
 };
@@ -565,12 +873,15 @@ async function checkout() {
       sale.customerId = S.custId;
       debt = { id: uid(), customerId: S.custId, saleId: sale.id, jumlah: total, jatuhTempo: L.dateToISO(S.jt), catatan: '' };
     }
-    await db.atomic(['sales', 'products', 'debts'], (st) => {
+    const saveLocal = () => db.atomic(['sales', 'products', 'debts'], (st) => {
       st('sales').put(sale);
       if (debt) st('debts').put(debt);
       items.forEach((i) => db.adjustStock(st, i.productId, -i.qty));
     });
+    if (debt) await saveLocalWithLoanCompensation(debt, saveLocal);
+    else await saveLocal();
     S.cart = []; S.terima = '';
+    if (debt) smartKasbonLastLoad = 0;
     await load(); renderPlist(); renderCart();
     showReceipt(sale);
   } finally {
@@ -973,10 +1284,140 @@ function vKasbon() {
       <span class="right"><b>${rp(sisa)}</b><small>dari total ${rp(d.jumlah)}</small><span class="acts">${sisa > 0 ? `<button class="btn small" data-act="paydebt" data-id="${esc(d.id)}">Catat pembayaran</button><a class="btn small ghost" target="_blank" rel="noopener" href="${L.waLink(c.wa, L.reminderText(c.nama, sisa, S.cfg.toko, d.jatuhTempo))}">Kirim pengingat</a>` : '<span class="chip ok">Lunas</span>'}</span></span></li>`;
   };
   return `<section class="grid2"><div class="stat"><span>Total piutang</span><b>${rp(L.totalReceivable(S.debts, S.payments))}</b></div><div class="stat"><span>Pelanggan</span><b>${S.customers.length}</b></div></section>
+  ${smartKasbonPanel()}
   <div class="row"><button class="btn primary" data-act="newcust2">Tambah pelanggan</button>${OWNER() ? '<button class="btn" data-act="manualdebt">Catat kasbon manual</button>' : ''}</div>
   <h2>Belum lunas</h2><ul class="rows tall">${open.length ? open.map(row).join('') : '<li class="muted">Tidak ada kasbon yang belum lunas.</li>'}</ul>
   <button class="btn ghost small" data-act="togglelunas">${S.showLunas ? 'Sembunyikan' : 'Tampilkan'} kasbon lunas (${closed.length})</button>
   ${S.showLunas ? `<ul class="rows tall">${closed.map(row).join('')}</ul>` : ''}`;
+}
+
+function smartKasbonPanel() {
+  const dashboard = S.smartKasbon;
+  const setupButton = OWNER()
+    ? `<button class="btn primary small" data-act="smart-kasbon-setup">${dashboard?.policy?.configured ? 'Ubah kebijakan' : 'Atur Smart Kasbon'}</button>`
+    : '';
+  if (S.smartKasbonLoading) return '<section class="card"><h2>Smart Kasbon</h2><p class="muted">Memuat analisis dan batas kasbon dari server…</p></section>';
+  if (S.smartKasbonError) return `<section class="card"><h2>Smart Kasbon</h2><p class="err">${esc(S.smartKasbonError)}</p><button class="btn small" data-act="smart-kasbon-refresh">Coba lagi</button></section>`;
+  if (!dashboard) return '<section class="card"><h2>Smart Kasbon</h2><p class="muted">Dashboard belum dimuat.</p><button class="btn small" data-act="smart-kasbon-refresh">Muat dashboard</button></section>';
+  const policy = dashboard.policy;
+  if (!policy?.configured) {
+    return `<section class="card"><h2>Smart Kasbon</h2><p>${OWNER()
+      ? 'Masukkan kas dan modal kerja sebagai input kebijakan. Server menghitung batas dari input ini, tetapi tidak memverifikasi snapshot vault secara independen.'
+      : 'Pemilik toko perlu mengatur kondisi keuangan dan kebijakan kasbon terlebih dahulu.'}</p>
+      <p class="muted small">Kasbon baru memerlukan koneksi internet. Kas dan modal kerja tidak dilacak otomatis oleh aplikasi.</p>${setupButton}</section>`;
+  }
+  const summary = dashboard.summary || {};
+  const risks = dashboard.risks || [];
+  const health = dashboard.health || risks[0] || {};
+  const healthNames = {
+    cold_start: 'Data belum cukup (cold start)', kritis: 'Kritis', menurun: 'Menurun',
+    stagnan: 'Stagnan', sangat_sehat: 'Sangat sehat', sehat: 'Sehat', stabil: 'Stabil',
+  };
+  const riskCounts = risks.reduce((counts, item) => {
+    const name = item.risk || 'sedang';
+    counts[name] = (counts[name] || 0) + 1;
+    return counts;
+  }, {});
+  const riskText = ['tinggi', 'sedang', 'rendah']
+    .filter((name) => riskCounts[name])
+    .map((name) => `${riskCounts[name]} ${name}`)
+    .join(' · ') || 'Belum ada riwayat pelanggan untuk dinilai';
+  const riskRows = risks.slice(0, 10).map((item) => {
+    const name = S.smartKasbonCustomerNames[item.customer_id] || 'Pelanggan pseudonim';
+    const remaining = item.current_customer_balance || 0;
+    return `<li><span>${esc(name)}<small>Risiko ${esc(item.risk || 'sedang')} · saldo ${rp(remaining)} · limit ${rp(item.limits?.per_customer || 0)}</small></span><b>Skor ${item.risk_score ?? 60}/100</b></li>`;
+  }).join('');
+  const decisions = (dashboard.decisions || []).slice(0, 5);
+  const model = dashboard.model || {};
+  const activeModel = model.active_model;
+  const currentCandidate = activeModel || model;
+  const evaluation = currentCandidate.metrics?.evaluation;
+  const hasEvaluation = evaluation && Number.isSafeInteger(evaluation.sample_count)
+    && ['accuracy', 'precision', 'recall', 'f1', 'brier_score', 'expected_calibration_error', 'pr_auc']
+      .every((key) => Number.isFinite(evaluation[key]));
+  const candidateEvaluation = model.state === 'shadow' ? model.metrics?.evaluation : null;
+  const hasCandidateEvaluation = candidateEvaluation && Number.isSafeInteger(candidateEvaluation.sample_count)
+    && ['accuracy', 'precision', 'recall', 'f1', 'pr_auc', 'brier_score', 'expected_calibration_error']
+      .every((key) => Number.isFinite(candidateEvaluation[key]));
+  const status = S.smartKasbonMutationInProgress && model.status === 'ML_READY_TO_TRAIN'
+    ? 'ML_TRAINING' : model.status;
+  const statusLabel = status === 'ML_ACTIVE' ? 'Machine Learning Active'
+    : status === 'ML_READY_TO_TRAIN' ? 'ML Ready to Train'
+      : status === 'ML_TRAINING' ? 'ML Training'
+        : status === 'ML_SHADOW' ? 'ML Shadow'
+          : status === 'RULE_BASED_FALLBACK' ? 'Rule-Based Fallback'
+            : 'Rule-Based';
+  const statusExplanation = status === 'ML_ACTIVE'
+    ? 'Prediksi berikutnya memakai artifact ML aktif. Keputusan batas dan persetujuan tetap ditentukan aturan server.'
+    : status === 'ML_READY_TO_TRAIN'
+      ? 'Dataset memenuhi ambang training, tetapi model belum dilatih dan diaktifkan. Sistem masih menggunakan Rule-Based.'
+      : status === 'ML_SHADOW'
+        ? 'Kandidat belum aktif. Prediksi tetap menggunakan Rule-Based sampai kandidat lolos evaluasi dan diaktifkan pemilik.'
+        : status === 'RULE_BASED_FALLBACK'
+          ? 'Machine Learning gagal atau artifact tidak valid; sistem kembali ke aturan bisnis sementara.'
+          : 'Machine Learning belum aktif karena data historis belum mencukupi. Sistem menggunakan aturan bisnis sementara.';
+  const trainButton = OWNER() && model.readiness?.eligible && !S.smartKasbonMutationInProgress
+    ? '<button class="btn small" data-act="smart-kasbon-model-evaluate">Latih dan evaluasi dari data toko</button>'
+    : '';
+  const activateButton = OWNER() && model.state === 'shadow'
+    && model.metrics?.activation_eligible === true && model.active_version !== model.version
+    ? `<button class="btn small" data-act="smart-kasbon-model-activate" data-version="${esc(model.version)}">Aktifkan advisory</button>`
+    : '';
+  const readiness = model.readiness || {};
+  const readinessCounts = readiness.counts || {};
+  const exclusionText = Object.entries(model.exclusions || {})
+    .filter(([, count]) => Number.isSafeInteger(count) && count > 0)
+    .map(([reason, count]) => `${esc(reason)}: ${count}`)
+    .join(' · ');
+  const metricsDetails = hasEvaluation ? `<details><summary>Evaluasi holdout aktual (${evaluation.sample_count} data)</summary>
+    <p class="small">Accuracy ${pct(evaluation.accuracy)} · Precision ${pct(evaluation.precision)} · Recall ${pct(evaluation.recall)} · F1 ${pct(evaluation.f1)}</p>
+    <p class="small">ROC-AUC ${Number.isFinite(evaluation.roc_auc) ? pct(evaluation.roc_auc) : 'tidak tersedia'} · PR-AUC ${pct(evaluation.pr_auc)} · Brier ${evaluation.brier_score.toFixed(3)} · ECE ${evaluation.expected_calibration_error.toFixed(3)}</p>
+    <p class="small">Confusion matrix: TP ${evaluation.confusion_matrix?.true_positive ?? '—'}, FP ${evaluation.confusion_matrix?.false_positive ?? '—'}, TN ${evaluation.confusion_matrix?.true_negative ?? '—'}, FN ${evaluation.confusion_matrix?.false_negative ?? '—'}.</p>
+    ${Number.isFinite(currentCandidate.metrics?.baseline?.pr_auc) ? `<p class="small">Baseline Rule-Based PR-AUC ${pct(currentCandidate.metrics.baseline.pr_auc)}, Brier ${Number.isFinite(currentCandidate.metrics.baseline.brier_score) ? currentCandidate.metrics.baseline.brier_score.toFixed(3) : '—'}.</p>` : ''}
+    </details>` : '';
+  const modelDetails = status === 'ML_ACTIVE' && activeModel
+    ? `<p class="small">Model ${esc(activeModel.version)} · dilatih ${fmtDate(activeModel.trained_at)} · ${activeModel.training_count} data training · ${activeModel.evaluation_count} data evaluasi.</p>
+      <p class="muted small">Model logistik per toko; hasil historis holdout tidak menjamin hasil mendatang dan dapat bias jika data transaksi/snapshot tidak lengkap atau berbeda.</p>${metricsDetails}`
+    : model.state === 'shadow'
+      ? `<p class="small">Kandidat ${esc(model.version)} · ${model.training_count} data training · ${model.evaluation_count} data evaluasi · ${model.metrics?.activation_eligible ? 'memenuhi guard evaluasi, menunggu aktivasi owner' : 'belum memenuhi guard evaluasi'}.</p>${metricsDetails}`
+      : '';
+  const candidateDetails = status === 'ML_ACTIVE' && model.state === 'shadow'
+    ? `<details><summary>Evaluasi kandidat ${esc(model.version)}</summary>
+      <p class="small">${model.training_count} data training · ${model.evaluation_count} data evaluasi · ${model.metrics?.activation_eligible ? 'memenuhi guard evaluasi' : 'belum memenuhi guard evaluasi'}.</p>
+      ${hasCandidateEvaluation
+        ? `<p class="small">Holdout: accuracy ${pct(candidateEvaluation.accuracy)} · precision ${pct(candidateEvaluation.precision)} · recall ${pct(candidateEvaluation.recall)} · F1 ${pct(candidateEvaluation.f1)} · PR-AUC ${pct(candidateEvaluation.pr_auc)} · Brier ${candidateEvaluation.brier_score.toFixed(3)} · ECE ${candidateEvaluation.expected_calibration_error.toFixed(3)}.</p>` : ''}
+      </details>`
+    : '';
+  return `<section class="card">
+    <div class="row wrap"><h2>Smart Kasbon</h2>${setupButton}<button class="btn ghost small" data-act="smart-kasbon-refresh">Perbarui</button></div>
+    <p>Kondisi toko: <b>${esc(healthNames[health.health] || 'Belum dinilai')}</b></p>
+    <div class="grid2">
+      <div class="stat"><span>Piutang aktif server</span><b>${rp(summary.total_receivable || 0)}</b></div>
+      <div class="stat"><span>Piutang terlambat</span><b class="${summary.overdue_receivable ? 'neg' : ''}">${rp(summary.overdue_receivable || 0)}</b></div>
+    </div>
+    <p class="small">Pelanggan aktif: ${summary.active_customers || 0} / ${policy.max_active_customers}. Kasbon aktif: ${summary.loan_count || 0}.</p>
+    <p class="small">Batas piutang efektif saat ini: ${rp(health.limits?.total_receivable || 0)} · batas per pelanggan paling tinggi ${rp(policy.max_per_customer)}.</p>
+    <p class="small">Ringkasan keuangan dari vault browser: ${health.metrics?.snapshot_fresh ? 'terbaru' : 'perlu diperbarui pemilik'}.</p>
+    <p class="muted small">Batas ini adalah aturan internal, bukan jaminan kesehatan usaha. Snapshot dan kas/modal kerja berasal dari browser/pemilik dan tidak dapat diverifikasi server terhadap vault terenkripsi.</p>
+    <p class="small">Risiko riwayat pelanggan: ${esc(riskText)}.</p>
+    ${riskRows ? `<details><summary>Skor risiko pelanggan (${risks.length})</summary><ul class="rows">${riskRows}</ul>${risks.length > 10 ? `<p class="muted small">Menampilkan 10 dari ${risks.length} pelanggan.</p>` : ''}</details>` : ''}
+    <p><span class="chip ${status === 'ML_ACTIVE' ? 'ok' : 'warn'}">${esc(statusLabel)}</span></p>
+    <p class="small">Metode prediksi: ${status === 'ML_ACTIVE' ? 'Machine Learning' : 'Rule-Based'}</p>
+    <p class="muted small">${esc(statusExplanation)}</p>
+    ${status !== 'ML_ACTIVE' ? `<p class="muted small">Status kesiapan dataset: ${esc(status)}. ${esc(readiness.reason || 'Kelayakan belum tersedia.')}</p>` : ''}
+    ${OWNER() ? `<details><summary>Kesiapan dataset dan status training</summary>
+      <p class="small">Observasi matang ${readinessCounts.mature_observations ?? 0} · on-time ${readinessCounts.on_time ?? 0} · late ${readinessCounts.late ?? 0}.</p>
+      <p class="small">Split yang memenuhi minimum: training ${readinessCounts.training_observations ?? 0} · evaluasi ${readinessCounts.evaluation_observations ?? 0} · pelanggan evaluasi independen ${readinessCounts.evaluation_customers ?? 0}.</p>
+      <p class="small">Ambang: training ${model.minimums?.trainingRows ?? '—'}, evaluasi ${model.minimums?.evaluationRows ?? '—'}, per kelas training ${model.minimums?.trainingPerClass ?? '—'}, per kelas evaluasi ${model.minimums?.evaluationPerClass ?? '—'}, pelanggan evaluasi ${model.minimums?.evaluationCustomers ?? '—'}.</p>
+      ${exclusionText ? `<p class="muted small">Data dikecualikan: ${exclusionText}.</p>` : ''}
+      ${model.source_limit_exceeded ? '<p class="err small">Dataset melebihi batas maksimum pemrosesan; training ditahan.</p>' : ''}
+      ${model.training_status?.last_error_code ? `<p class="err small">Kode kegagalan terakhir: ${esc(model.training_status.last_error_code)}.</p>` : ''}
+      </details>` : ''}
+    ${modelDetails}
+    ${candidateDetails}
+    <div class="row wrap">${trainButton}${activateButton}</div>
+    ${decisions.length ? `<details><summary>Keputusan terbaru (${decisions.length})</summary><ul class="plain small">${decisions.map((item) => `<li>${esc(item.action)} · ${item.approved === null ? 'dicatat' : item.approved ? 'disetujui' : 'ditolak'} · ${fmtDate(item.created_at)}</li>`).join('')}</ul></details>` : ''}
+  </section>`;
 }
 async function newCustomer() {
   const v = await formModal({
@@ -998,27 +1439,55 @@ async function payDebt(id) {
     const sisa = L.debtRemaining(d, S.payments);
     if (sisa <= 0) return toast('Kasbon ini telah lunas.', 'err');
     const v = await formModal({
-      title: 'Catat pembayaran kasbon', note: `Sisa kasbon: ${rp(sisa)}`,
-      fields: [{ name: 'jumlah', label: 'Jumlah dibayar (Rp)', type: 'currency', min: 1, required: true, value: sisa }, { name: 'tanggal', label: 'Tanggal', type: 'date', value: L.ymd(new Date()), required: true }],
+      title: 'Catat pembayaran kasbon',
+      note: `Sisa kasbon: ${rp(sisa)}. Waktu pencatatan ditetapkan oleh server.`,
+      fields: [{ name: 'jumlah', label: 'Jumlah dibayar (Rp)', type: 'currency', min: 1, required: true, value: sisa }],
       validate: (x) => (x.jumlah > sisa ? `Melebihi sisa kasbon (${rp(sisa)}).` : ''),
     });
     if (!v) return;
-    const payment = { id: uid(), debtId: id, jumlah: v.jumlah, waktu: L.dateToISO(v.tanggal) };
+    const payment = { id: uid(), debtId: id, jumlah: v.jumlah };
+    const expected = cloud.currentContext();
+    const paymentId = await L.pseudonymousUuid('payment', payment.id, expected?.storeId);
+    const backendPayment = {
+      payment_id: paymentId,
+      loan_id: await L.pseudonymousUuid('loan', id, expected?.storeId),
+      amount: payment.jumlah,
+    };
     let paidOff = false;
-    await db.atomic(['debts', 'payments'], (store) => {
-      const debtRequest = store('debts').get(id);
-      debtRequest.onsuccess = () => {
-        const currentDebt = debtRequest.result;
-        if (!currentDebt) throw new Error('Kasbon tidak ditemukan saat menyimpan pembayaran.');
-        const paymentsRequest = store('payments').getAll();
-        paymentsRequest.onsuccess = () => {
-          const status = L.validateDebtPayment(currentDebt, paymentsRequest.result, v.jumlah);
-          store('payments').put(payment);
-          paidOff = status.isPaid;
+    try {
+      const result = await smartKasbonMutationWithRetry(
+        'payment', { payment: backendPayment }, 'void_payment',
+        { payment_id: paymentId }, expected,
+      );
+      if (!result?.paid_at || !Number.isFinite(new Date(result.paid_at).getTime())) {
+        throw new Error('Server tidak mengembalikan waktu pembayaran yang valid.');
+      }
+      payment.waktu = new Date(result.paid_at).toISOString();
+      await db.atomic(['debts', 'payments'], (store) => {
+        const debtRequest = store('debts').get(id);
+        debtRequest.onsuccess = () => {
+          const currentDebt = debtRequest.result;
+          if (!currentDebt) throw new Error('Kasbon tidak ditemukan saat menyimpan pembayaran.');
+          const paymentsRequest = store('payments').getAll();
+          paymentsRequest.onsuccess = () => {
+            const status = L.validateDebtPayment(currentDebt, paymentsRequest.result, v.jumlah);
+            store('payments').put(payment);
+            paidOff = status.isPaid;
+          };
         };
-      };
-    });
-    toast(paidOff ? 'Kasbon telah lunas.' : 'Pembayaran kasbon berhasil dicatat.'); await refresh();
+      });
+    } catch (error) {
+      try {
+        assertSmartKasbonContext(expected);
+        await cloud.smartKasbon('void_payment', { payment_id: paymentId });
+      } catch (compensationError) {
+        throw new Error(`Pembayaran tercatat di server, tetapi penyimpanan lokal gagal dan pembatalan otomatis juga gagal. Hubungi pemilik toko sebelum mencoba ulang. Detail: ${compensationError.message}`);
+      }
+      throw error;
+    }
+    toast(paidOff ? 'Kasbon telah lunas.' : 'Pembayaran kasbon berhasil dicatat.');
+    await refresh();
+    await fetchSmartKasbon(true);
   } finally {
     S.processingDebtIds.delete(id);
   }
@@ -1035,8 +1504,94 @@ async function manualDebt() {
     ],
   });
   if (!v) return;
-  await db.put('debts', { id: uid(), customerId: v.customerId, saleId: null, jumlah: v.jumlah, jatuhTempo: L.dateToISO(v.jt), catatan: v.catatan });
-  toast('Kasbon dicatat.'); await refresh();
+  const debt = { id: uid(), customerId: v.customerId, saleId: null, jumlah: v.jumlah, jatuhTempo: L.dateToISO(v.jt), catatan: v.catatan };
+  await saveLocalWithLoanCompensation(debt, () => db.put('debts', debt));
+  toast('Kasbon dicatat.'); await refresh(); await fetchSmartKasbon(true);
+}
+
+async function setupSmartKasbon() {
+  if (!OWNER()) return toast('Hanya pemilik yang dapat mengatur kebijakan Smart Kasbon.', 'err');
+  const policy = S.smartKasbon?.policy;
+  const v = await formModal({
+    title: policy?.configured ? 'Ubah kebijakan Smart Kasbon' : 'Atur Smart Kasbon',
+    note: 'Kas dan modal kerja tidak dilacak otomatis. Masukkan kondisi aktual toko. Batas kasbon akan dihitung di server dari angka ini dan ringkasan transaksi.',
+    fields: [
+      { name: 'cashAvailable', label: 'Kas tersedia saat ini (Rp)', type: 'currency', min: 0, required: true, value: policy?.cash_available ?? '' },
+      { name: 'workingCapital', label: 'Modal kerja sebelum kewajiban dan piutang (Rp)', type: 'currency', min: 0, required: true, value: policy?.working_capital ?? '' },
+      { name: 'liabilities', label: 'Kewajiban usaha (Rp)', type: 'currency', min: 0, required: true, value: policy?.liabilities ?? 0 },
+      { name: 'reserveCash', label: 'Cadangan kas minimum (Rp)', type: 'currency', min: 0, required: true, value: policy?.reserve_cash ?? 0 },
+      { name: 'maxPerCustomer', label: 'Batas nominal per pelanggan (Rp)', type: 'currency', min: 1, required: true, value: policy?.max_per_customer ?? 100000 },
+      { name: 'maxActiveCustomers', label: 'Maksimum pelanggan kasbon aktif', type: 'number', min: 1, required: true, value: policy?.max_active_customers ?? 2 },
+      { name: 'maxTotalReceivable', label: 'Batas total piutang kasbon (Rp)', type: 'currency', min: 1, required: true, value: policy?.max_total_receivable ?? 200000 },
+    ],
+    validate: (values) => values.reserveCash > values.cashAvailable
+      ? 'Cadangan kas tidak boleh melebihi kas tersedia.'
+      : '',
+  });
+  if (!v) return;
+  const confirmed = await confirmModal(
+    'Simpan kebijakan Smart Kasbon?',
+    'Simpan kebijakan',
+    'Pastikan angka kas, modal kerja, kewajiban, dan cadangan sudah dikonfirmasi pemilik. Aplikasi tidak dapat memverifikasi saldo kas aktual.',
+  );
+  if (!confirmed) return;
+  const financialSnapshot = L.smartKasbonFinancialSnapshot(S);
+  if (S.smartKasbonMutationInProgress || S.processingDebtIds.size || S.checkoutInProgress) {
+    throw new Error('Transaksi Smart Kasbon lain sedang diproses.');
+  }
+  S.smartKasbonMutationInProgress = true;
+  try {
+    await cloud.smartKasbon('set_policy', {
+      policy: v,
+      financial_snapshot: financialSnapshot,
+    });
+    toast('Kebijakan Smart Kasbon disimpan.');
+    await fetchSmartKasbon(true);
+  } finally {
+    S.smartKasbonMutationInProgress = false;
+  }
+}
+
+async function evaluateSmartKasbonModel() {
+  if (!OWNER()) return toast('Hanya pemilik yang dapat melatih model Smart Kasbon.', 'err');
+  if (S.smartKasbonMutationInProgress || S.processingDebtIds.size || S.checkoutInProgress) {
+    return toast('Selesaikan transaksi kasbon yang sedang berjalan terlebih dahulu.', 'err');
+  }
+  S.smartKasbonMutationInProgress = true;
+  try {
+    const result = await cloud.smartKasbon('evaluate_model');
+    await fetchSmartKasbon(true);
+    if (result.state === 'shadow') {
+      toast(result.activation_eligible
+        ? 'Evaluasi holdout selesai. Kandidat disimpan sebagai shadow; model belum aktif.'
+        : 'Evaluasi selesai, tetapi kandidat belum memenuhi syarat aktivasi.');
+    } else {
+      toast(result.reason || 'Model belum dapat dilatih dari data toko.', 'err');
+    }
+  } finally {
+    S.smartKasbonMutationInProgress = false;
+  }
+}
+
+async function activateSmartKasbonModel(version) {
+  if (!OWNER()) return toast('Hanya pemilik yang dapat mengaktifkan model Smart Kasbon.', 'err');
+  if (S.smartKasbonMutationInProgress || S.processingDebtIds.size || S.checkoutInProgress) {
+    return toast('Selesaikan transaksi kasbon yang sedang berjalan terlebih dahulu.', 'err');
+  }
+  const confirmed = await confirmModal(
+    'Aktifkan model advisory Smart Kasbon?',
+    'Aktifkan model',
+    'Model hanya menampilkan indikasi risiko. Batas dan persetujuan kasbon tetap ditentukan oleh aturan yang ada.',
+  );
+  if (!confirmed) return;
+  S.smartKasbonMutationInProgress = true;
+  try {
+    const result = await cloud.smartKasbon('activate_model', { version });
+    await fetchSmartKasbon(true);
+    toast(`Model advisory ${result.version} diaktifkan.`);
+  } finally {
+    S.smartKasbonMutationInProgress = false;
+  }
 }
 
 /* ============ Laporan ============ */
@@ -1121,7 +1676,39 @@ function exportXlsx() {
 
 /* ============ Zakat ============ */
 function vZakat() {
-  return '<a class="btn primary big" href="https://donasi.lazismu.org/zakatperusahaan" target="_blank" rel="noopener noreferrer">Buka Zakat Perusahaan Lazismu</a>';
+  const value = (key, fallback = '') => esc(S.cfg[key] ?? fallback);
+  const amount = (id, key, label) => `<label>${label}<input id="${id}" type="number" min="0" step="1" inputmode="numeric" value="${value(key)}"></label>`;
+  const saved = S.cfg.zakatLastCalculation;
+  const savedAt = saved ? Date.parse(saved.waktuSimpan || saved.waktuHitung) : NaN;
+  return `<section class="card">
+    <h2>Kalkulator zakat usaha</h2>
+    <p class="muted small">Kalkulasi zakat perdagangan berdasarkan data yang dimasukkan pemilik. Verifikasi nisab, haul, harga emas, dan kewajiban kepada lembaga zakat.</p>
+    <div class="grid2">
+      <label>Nama usaha<input id="z-nama" value="${value('znama')}"></label>
+      <label>Jenis usaha<select id="z-jenis">
+        <option value="perdagangan" ${value('zjenis', 'perdagangan') === 'perdagangan' ? 'selected' : ''}>Perdagangan</option>
+        <option value="lainnya" ${value('zjenis') === 'lainnya' ? 'selected' : ''}>Lainnya (belum didukung)</option>
+      </select></label>
+      ${amount('z-kas', 'zkas', 'Kas usaha (Rp)')}
+      ${amount('z-bank', 'zbank', 'Saldo rekening usaha (Rp)')}
+      ${amount('z-persediaan', 'zpersediaan', 'Nilai pasar persediaan (Rp)')}
+      ${amount('z-keuntungan', 'zkeuntungan', 'Keuntungan belum tercakup (Rp)')}
+      ${amount('z-harta-lain', 'zhartaLain', 'Harta perdagangan lain (Rp)')}
+      ${amount('z-piutang', 'zpiutang', 'Piutang diperkirakan tertagih (Rp)')}
+      ${amount('z-piutang-macet', 'zpiutangMacet', 'Piutang bermasalah (Rp)')}
+      ${amount('z-utang', 'zutang', 'Utang jatuh tempo (Rp)')}
+      ${amount('z-utang-lain', 'zutangLain', 'Utang belum jatuh tempo (Rp)')}
+      <label>Tanggal mulai haul<input id="z-mulai" type="date" value="${value('zmulai')}"></label>
+      <label>Tanggal perhitungan<input id="z-tanggal" type="date" value="${value('ztanggal', L.ymd(new Date()))}"></label>
+      ${amount('z-emas', 'hargaEmas', 'Harga emas per gram (Rp)')}
+      <label>Sumber harga emas<input id="z-sumber" value="${value('zsumber')}"></label>
+      <label>Tanggal acuan harga emas<input id="z-emas-tanggal" type="date" value="${value('zemasTanggal')}"></label>
+      <label class="row"><input id="z-haul-confirm" type="checkbox" ${S.cfg.zhaulConfirm ? 'checked' : ''}> Saya mengonfirmasi kepemilikan harta berkesinambungan selama haul</label>
+    </div>
+    <div id="z-hasil" aria-live="polite"></div>
+    ${Number.isFinite(savedAt) ? `<p class="muted small">Perhitungan terakhir disimpan ${esc(new Date(savedAt).toLocaleString('id-ID'))}.</p>` : ''}
+    <a class="btn ghost" href="https://donasi.lazismu.org/zakatperusahaan" target="_blank" rel="noopener noreferrer">Buka Zakat Perusahaan Lazismu</a>
+  </section>`;
 }
 function mZakat() {
   const fields = [
@@ -1267,6 +1854,16 @@ function mZakat() {
   calculate();
 }
 
+async function saveZakatCalculation() {
+  if (!S.lastZakat) return toast('Lengkapi data perhitungan zakat terlebih dahulu.', 'err');
+  await setCfg('zakatLastCalculation', {
+    ...S.lastZakat,
+    waktuSimpan: new Date().toISOString(),
+  });
+  toast('Perhitungan zakat tersimpan di penyimpanan terenkripsi.');
+  render();
+}
+
 /* ============ Menu dan pengaturan ============ */
 function vMenu() {
   const items = [['belanja', 'Belanja barang', 'Catat barang masuk'], ['pengeluaran', 'Pengeluaran', 'Biaya usaha dan uang pribadi'], ['laporan', 'Laporan', 'Laba rugi, grafik, ekspor'], ['zakat', 'Zakat usaha', 'Buka layanan Lazismu'], ['pengaturan', 'Pengaturan', 'Akun, asisten, sinkronisasi, cadangan']];
@@ -1279,6 +1876,7 @@ function vPengaturan() {
       <label class="field"><span>Nama pemilik</span><input id="s-pemilik" value="${esc(S.cfg.pemilik || '')}"></label>
       <label class="field"><span>Perkiraan waktu pengiriman barang (hari)</span><input id="s-lead" type="number" min="1" max="14" value="${esc(S.cfg.leadDays || 2)}"><small>Digunakan untuk memperkirakan kebutuhan pengisian stok.</small></label>
       <button class="btn primary" data-act="saveprofile">Simpan profil</button>` : '<p class="muted">Pemilik mengelola profil toko, laporan dan akses anggota.</p>'}</section>
+  <section class="card"><h2>Account Recovery Code</h2><p class="muted small">Buat kode sekali pakai untuk mengatur ulang kata sandi akun tanpa email. Kode berlaku satu tahun dan kode sebelumnya langsung tidak berlaku. Kode ini berbeda dari Kunci Pemulihan Data toko.</p><button class="btn" data-act="create-account-recovery">Buat kode pemulihan akun</button></section>
   <section class="card"><h2>Rekening transfer</h2><p class="muted small">Informasi rekening ini ditampilkan kepada kasir dan pelanggan saat metode transfer dipilih. Pembayaran tetap perlu diperiksa secara manual.</p>${transferAccountDetails()}</section>
   ${OWNER() ? `<section class="card"><h2>QRIS toko</h2><p class="muted small">Unggah kode QRIS statis milik toko. Berkas utama disimpan secara privat di Supabase Storage, sedangkan salinan offline disimpan dalam penyimpanan toko terenkripsi. Pembayaran tidak diverifikasi secara otomatis.</p>
     ${S.qrisStorageError ? `<p class="err">Penyimpanan QRIS belum tersedia: ${esc(S.qrisStorageError)}. Pastikan migrasi penyimpanan QRIS telah dijalankan dan koneksi Supabase tersedia.</p>` : ''}
@@ -1286,12 +1884,12 @@ function vPengaturan() {
     ${S.cfg.qrisImage ? `<img class="qris-preview" src="${esc(S.cfg.qrisImage)}" alt="Pratinjau QRIS toko"><div class="row wrap"><label class="btn">Ganti gambar<input id="qris-file" type="file" accept="image/png,image/jpeg,.png,.jpg,.jpeg" hidden></label><button class="btn danger" data-act="delete-qris">Hapus QRIS</button></div>` : `<label class="btn">Pilih gambar QRIS<input id="qris-file" type="file" accept="image/png,image/jpeg,.png,.jpg,.jpeg" hidden></label>`}
       ${S.qrisPreview ? `<div class="qris-upload-preview"><p class="muted small">Pratinjau gambar yang belum disimpan:</p><img class="qris-preview" src="${esc(S.qrisPreview)}" alt="Pratinjau QRIS baru"><div class="row wrap"><button class="btn primary" data-act="save-qris">Simpan QRIS</button><button class="btn ghost" data-act="cancel-qris-preview">Batal</button></div></div>` : ''}
     <p class="muted small">Format PNG atau JPEG, maksimal 1 MB. Pastikan gambar yang diunggah adalah QRIS toko dan dapat dipindai.</p></section>
-    <section class="card"><h2>Undang asisten</h2><p class="muted small">Kirim undangan melalui email. Setelah asisten membuat kata sandi, bagikan kunci pemulihan melalui saluran aman yang terpisah agar asisten dapat membuka data toko terenkripsi.</p>
-    <form id="invite-form" class="row wrap"><label class="field"><span>Email asisten</span><input name="email" type="email" required autocomplete="email"></label><button class="btn primary" type="submit">Kirim undangan</button></form><button class="btn" data-act="manage-assistants">Kelola asisten</button></section>
+    <section class="card"><h2>Undang asisten</h2><p class="muted small">Buat kode undangan yang hanya dapat digunakan sekali dan berlaku tujuh hari. Berikan kode secara langsung melalui saluran aman; setelah asisten membuat akun, bagikan Kunci Pemulihan Data secara terpisah.</p>
+    <form id="invite-form" class="row wrap"><button class="btn primary" type="submit">Buat kode undangan</button></form><button class="btn" data-act="manage-assistants">Kelola asisten</button></section>
     <section class="card"><h2>Kunci pemulihan</h2><p class="muted small">Buat kunci pemulihan baru jika kunci sebelumnya hilang. Kunci lama tidak berlaku setelah diganti. Simpan kunci baru sebelum membagikannya kepada asisten.</p><button class="btn" data-act="rotate-recovery">Buat kunci pemulihan baru</button></section>` : ''}
   <section class="card"><h2>Sinkronisasi</h2><p class="muted small">Perubahan dienkripsi sebelum dikirim. Saat offline, data tetap tersimpan dalam keadaan terenkripsi di perangkat dan akan disinkronkan saat koneksi tersedia.</p><button class="btn" data-act="sync">Sinkronkan sekarang</button></section>
-  <section class="card"><h2>Cadangan terenkripsi</h2><p class="muted small">Berkas cadangan tidak memuat data dalam bentuk terbuka. Gunakan kata sandi akun untuk mengenkripsi dan memulihkan cadangan.</p>
-    <div class="row wrap"><button class="btn primary" data-act="backup">Unduh cadangan</button><label class="btn">Pulihkan cadangan<input id="restore" type="file" accept="application/json,.json" hidden></label></div></section>
+  ${OWNER() ? `<section class="card"><h2>Cadangan terenkripsi</h2><p class="muted small">Berkas cadangan tidak memuat data dalam bentuk terbuka. Gunakan kata sandi akun untuk mengenkripsi dan memulihkan cadangan.</p>
+    <div class="row wrap"><button class="btn primary" data-act="backup">Unduh cadangan</button><label class="btn">Pulihkan cadangan<input id="restore" type="file" accept="application/json,.json" hidden></label></div></section>` : ''}
   ${OWNER() ? `<section class="card"><h2>Penghapusan data</h2><div class="row wrap"><button class="btn danger" data-act="reset">Hapus semua data toko</button></div></section>` : ''}
   <section class="card"><button class="btn danger" data-act="logout">Keluar dari akun</button></section>
   <p class="muted small center">WarungPintar 2.0 · Data dienkripsi dengan AES-GCM dan kunci akun</p>`;
@@ -1450,6 +2048,11 @@ const A = {
   delmoney: async (d) => { if (await confirmModal('Hapus catatan ini?', 'Hapus')) { await db.del(d.kind, d.id); await refresh(); } },
   paydebt: (d) => payDebt(d.id),
   manualdebt: manualDebt,
+  'smart-kasbon-setup': setupSmartKasbon,
+  'smart-kasbon-refresh': () => fetchSmartKasbon(true),
+  'smart-kasbon-model-evaluate': evaluateSmartKasbonModel,
+  'smart-kasbon-model-activate': (d) => activateSmartKasbonModel(d.version),
+  'save-zakat': saveZakatCalculation,
   togglelunas: () => { S.showLunas = !S.showLunas; render(); },
   csv: exportCSV,
   xlsx: exportXlsx,
@@ -1464,7 +2067,7 @@ const A = {
     await setCfg('leadDays', Math.min(14, Math.max(1, Number($('#s-lead').value) || 2)));
     toast('Profil disimpan.'); render();
   },
-  'auth-mode': (d) => { S.authMode = d.mode; S.authMessage = ''; renderAuth(); },
+  'auth-mode': (d) => { S.authMode = d.mode; S.authFlow = null; S.authMessage = ''; renderAuth(); },
   'offline-unlock': async () => {
     const password = $('#auth-form').elements.password.value;
     const recovery = $('#auth-form').elements.recovery.value.trim();
@@ -1490,13 +2093,15 @@ const A = {
     } else if (result.offline) toast('Mode luring. Perubahan tersimpan terenkripsi di perangkat dan akan disinkronkan saat koneksi tersedia.', 'err');
     else toast('Data berhasil disinkronkan.');
   },
-  invite: async (email) => { await cloud.inviteAssistant(email); toast('Undangan asisten dikirim ke ' + email + '.'); },
   'manage-assistants': async () => {
-    const assistants = await cloud.listAssistants();
-    const list = assistants.length
-      ? `<ul class="rows">${assistants.map((assistant) => `<li><span>${esc(assistant.email)}<small>Bergabung ${fmtDate(assistant.joined_at)}</small></span><button class="btn small danger" data-act="remove-assistant" data-id="${esc(assistant.user_id)}" data-email="${esc(assistant.email)}">Cabut akses</button></li>`).join('')}</ul>`
+    const result = await cloud.listAssistants();
+    const list = result.assistants.length
+      ? `<ul class="rows">${result.assistants.map((assistant) => `<li><span>${esc(assistant.email)}<small>Bergabung ${fmtDate(assistant.joined_at)}</small></span><button class="btn small danger" data-act="remove-assistant" data-id="${esc(assistant.user_id)}" data-email="${esc(assistant.email)}">Cabut akses</button></li>`).join('')}</ul>`
       : '<p class="muted">Belum ada asisten yang bergabung.</p>';
-    openDialog(`<div class="dlg-body"><h2>Asisten toko</h2>${list}<div class="row end"><button class="btn ghost" data-close>Tutup</button></div></div>`);
+    const invites = result.pendingInvites.length
+      ? `<h3>Kode undangan aktif</h3><ul class="rows">${result.pendingInvites.map((invite) => `<li><span>Belum digunakan<small>Berlaku sampai ${fmtDate(invite.expires_at)}</small></span><button class="btn small danger" data-act="revoke-assistant-invite" data-id="${esc(invite.id)}">Cabut kode</button></li>`).join('')}</ul>`
+      : '<p class="muted">Tidak ada kode undangan aktif.</p>';
+    openDialog(`<div class="dlg-body"><h2>Asisten toko</h2>${list}${invites}<div class="row end"><button class="btn ghost" data-close>Tutup</button></div></div>`);
   },
   'remove-assistant': async (data) => {
     $('#dlg').close();
@@ -1505,6 +2110,15 @@ const A = {
     $('#dlg').close();
     toast('Akses asisten dicabut.');
     await A['manage-assistants']();
+  },
+  'revoke-assistant-invite': async (data) => {
+    await cloud.revokeAssistantInvite(data.id);
+    toast('Kode undangan dicabut.');
+    $('#dlg').close();
+    await A['manage-assistants']();
+  },
+  'create-account-recovery': async () => {
+    await issueInitialAccountRecoveryCode();
   },
   'rotate-recovery': async () => {
     const code = await cloud.rotateRecoveryCode();
@@ -1519,18 +2133,64 @@ const A = {
   },
   reset: async () => {
     if (!(await confirmModal('Hapus semua data toko?', 'Hapus semua', 'Produk, transaksi, kasbon, dan pengaturan toko akan dihapus dari server dan perangkat.'))) return;
-    await db.wipe(); await setCfg('toko', S.account.storeName); S.cart = []; toast('Semua data dihapus.'); await refresh();
+    if (S.smartKasbonMutationInProgress || S.processingDebtIds.size || S.checkoutInProgress) {
+      throw new Error('Transaksi Smart Kasbon lain sedang diproses.');
+    }
+    S.smartKasbonMutationInProgress = true;
+    try {
+      await db.wipe();
+      await setCfg('toko', S.account.storeName);
+      await setCfg('smartKasbonResetPending', true);
+      await setCfg('smartKasbonClearPending', false);
+      await setCfg('smartKasbonBootstrapDone', false);
+      S.cart = [];
+      await refresh();
+      if (navigator.onLine) {
+        await fetchSmartKasbon(true);
+        if (S.cfg.smartKasbonResetPending) {
+          toast('Data lokal telah dihapus, tetapi reset Smart Kasbon server belum selesai. Buka halaman Kasbon saat koneksi tersedia untuk mencoba kembali.', 'err');
+        } else if (S.smartKasbonError) {
+          toast('Data lokal dan kebijakan Smart Kasbon telah direset, tetapi dashboard belum berhasil dimuat: ' + S.smartKasbonError, 'err');
+        } else {
+          toast('Semua data dihapus. Kebijakan Smart Kasbon perlu diatur kembali.');
+        }
+      } else {
+        toast('Data lokal dihapus. Kebijakan dan riwayat Smart Kasbon server akan direset saat koneksi tersedia.');
+      }
+    } finally {
+      S.smartKasbonMutationInProgress = false;
+    }
   },
   'clear-transactions': async () => {
     if (!(await confirmModal(
       'Hapus semua data transaksi?',
       'Hapus transaksi',
-      'Riwayat penjualan, belanja barang, pengeluaran, penarikan pribadi, kasbon, dan pembayarannya akan dihapus. Produk, pelanggan, pengaturan toko, serta jumlah stok saat ini tidak berubah. Tindakan ini tidak dapat dibatalkan.',
+      'Riwayat penjualan, belanja barang, pengeluaran, penarikan pribadi, kasbon, dan pembayarannya akan dihapus. Produk, pelanggan, pengaturan toko, serta jumlah stok saat ini tidak berubah. Catatan Smart Kasbon di server akan ditandai batal saat koneksi tersedia. Tindakan ini tidak dapat dibatalkan.',
     ))) return;
-    await db.clearTransactions();
-    S.cart = [];
-    await refresh();
-    toast('Semua data transaksi telah dihapus. Produk dan jumlah stok tetap dipertahankan.');
+    if (S.smartKasbonMutationInProgress || S.processingDebtIds.size || S.checkoutInProgress) {
+      throw new Error('Transaksi Smart Kasbon lain sedang diproses.');
+    }
+    S.smartKasbonMutationInProgress = true;
+    try {
+      await db.clearTransactions();
+      await setCfg('smartKasbonClearPending', true);
+      S.cart = [];
+      await refresh();
+      if (navigator.onLine) {
+        await fetchSmartKasbon(true);
+        if (S.cfg.smartKasbonClearPending) {
+          toast('Data lokal telah dihapus, tetapi riwayat Smart Kasbon di server belum dibersihkan. Buka halaman Kasbon saat koneksi tersedia untuk mencoba kembali.', 'err');
+        } else if (S.smartKasbonError) {
+          toast('Data transaksi dan riwayat Smart Kasbon telah dibersihkan, tetapi dashboard belum berhasil dimuat: ' + S.smartKasbonError, 'err');
+        } else {
+          toast('Semua data transaksi telah dihapus. Produk dan jumlah stok tetap dipertahankan.');
+        }
+      } else {
+        toast('Data lokal telah dihapus. Riwayat Smart Kasbon di server akan dibersihkan saat koneksi tersedia.');
+      }
+    } finally {
+      S.smartKasbonMutationInProgress = false;
+    }
   },
   'copy-recovery': async () => {
     await navigator.clipboard.writeText(S.recoveryCode);
@@ -1568,16 +2228,21 @@ document.addEventListener('click', (e) => {
 document.addEventListener('submit', (e) => {
   if (e.target.id === 'auth-form') {
     e.preventDefault();
-    const message = S.authMode === 'register' ? 'Sedang membuat akun...'
-      : S.authFlow?.invite || S.authFlow?.passwordRecovery ? 'Sedang memperbarui kata sandi...'
-        : 'Sedang masuk dan membuka data...';
+    const message = S.authMode === 'login' ? 'Sedang masuk dan membuka data...' : 'Sedang membuat akun...';
     withLoading(() => submitAuth(e.target), message)
       .catch((err) => { console.error(err); renderAuth(err.message); });
   } else if (e.target.id === 'invite-form') {
     e.preventDefault();
-    const email = new FormData(e.target).get('email').trim().toLowerCase();
-    withLoading(() => cloud.inviteAssistant(email), 'Sedang mengirim undangan...')
-      .then(() => toast('Undangan asisten dikirim ke ' + email + '.'))
+    withLoading(async () => {
+      const result = await cloud.inviteAssistant();
+      await showOneTimeCode({
+        title: 'Simpan kode undangan asisten',
+        description: 'Berikan kode kepada orang yang akan bergabung. Kode terikat ke toko ini, berlaku tujuh hari, dan hanya dapat digunakan sekali.',
+        code: result.invitation_code,
+        expiresAt: result.expires_at,
+        filename: 'warungpintar-kode-undangan-asisten.txt',
+      });
+    }, 'Sedang membuat kode undangan...')
       .catch((err) => { console.error(err); toast('Gagal mengundang asisten: ' + err.message, 'err'); });
   }
 });
@@ -1594,6 +2259,11 @@ document.addEventListener('change', (e) => {
   else if (t.id === 'rf') { S.rep.from = t.value || S.rep.from; render(); }
   else if (t.id === 'rt') { S.rep.to = t.value || S.rep.to; render(); }
   else if (t.id === 'restore' && t.files[0]) {
+    if (!OWNER()) {
+      t.value = '';
+      toast('Hanya pemilik yang dapat memulihkan cadangan toko.', 'err');
+      return;
+    }
     const file = t.files[0];
     let restoredLocally = false;
     withLoading(async () => {
@@ -1609,6 +2279,8 @@ document.addEventListener('change', (e) => {
       } else return;
       if (!(await confirmModal('Ganti data pada perangkat dan server?', 'Pulihkan', 'Data saat ini akan diganti dan perubahan akan disinkronkan ke server.'))) return;
       await db.importAll(data);
+      await setCfg('smartKasbonClearPending', true);
+      await setCfg('smartKasbonBootstrapDone', false);
       restoredLocally = true;
       await refresh();
       const result = await cloud.syncNow();
@@ -1654,14 +2326,21 @@ function netStatus() {
 addEventListener('online', netStatus); addEventListener('offline', netStatus);
 
 (async function init() {
+  if (ENVIRONMENT === 'staging') {
+    const badge = $('#environment');
+    badge.hidden = false;
+    badge.textContent = 'STAGING';
+    badge.title = 'Koneksi menggunakan project Supabase staging.';
+    badge.setAttribute('aria-label', 'Environment staging');
+  }
   netStatus();
+  if (S.checkoutInProgress || S.smartKasbonMutationInProgress || S.processingDebtIds.size) {
+    return toast('Tunggu sampai transaksi kasbon atau pembayaran selesai sebelum keluar.', 'err');
+  }
   try {
     if (navigator.storage?.persist) await navigator.storage.persist();
     const authState = await supabase.restoreSession();
-    if (authState?.invite || authState?.passwordRecovery) {
-      S.authFlow = { invite: authState.invite, passwordRecovery: authState.passwordRecovery, email: authState.user.email };
-      renderAuth(authState.invite ? 'Anda diundang untuk bergabung ke toko. Buat kata sandi dan masukkan kunci pemulihan yang diberikan oleh pemilik.' : 'Buat kata sandi baru. Kunci pemulihan diperlukan untuk membuka data terenkripsi.');
-    } else if (authState?.user) {
+    if (authState?.user) {
       S.authEmail = authState.user.email || '';
       try {
         const account = await cloud.unlockRememberedDevice(authState.user.id);

@@ -80,6 +80,8 @@ body.app-ready .app-splash { opacity: 0; visibility: hidden; pointer-events: non
 .brand { font-size: .85rem; opacity: .85; }
 .top h1 { font-size: 1.4rem; line-height: 1.2; }
 .top-r { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; justify-content: flex-end; }
+.chip.staging { background: #ffcf33; color: #641414; border: 2px solid #fff; font-weight: 900; letter-spacing: .04em; }
+.chip.staging[hidden] { display: none; }
 .top-r #role { display: flex; gap: 6px; align-items: center; justify-content: flex-end; flex-wrap: wrap; min-width: 0; }
 .top-r #role > .chip { max-width: 190px; overflow-wrap: anywhere; }
 .top .btn.ghost { color: #fff; border-color: rgba(255,255,255,.6); }

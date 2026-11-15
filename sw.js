@@ -1,6 +1,6 @@
 // Service worker: menyimpan berkas aplikasi agar bisa dibuka tanpa internet.
 // Naikkan VERSI setiap kali berkas aplikasi diubah agar cache diperbarui.
-const VERSI = 'warungpintar-v45';
+const VERSI = 'warungpintar-v48';
 const BERKAS = ['./', './index.html', './css/style.css', './js/app.js', './js/db.js', './js/logic.js', './js/receipt.js',
   './js/xlsx.js', './js/config.js', './js/crypto.js', './js/currency.js', './js/supabase.js', './js/cloud-sync.js',
   './manifest.webmanifest', './icons/icon-128.png', './icons/icon-192.png', './icons/icon-512.png', './icons/icon-maskable-512.png', './icons/logo-reference.png', './icons/original-attached-icon.png', './icons/splash-1125x2436.png', './icons/splash-1170x2532.png', './icons/splash-2048x2732.png'];
@@ -21,7 +21,9 @@ self.addEventListener('activate', (e) => {
 });
 // Jaringan dulu (agar pembaruan cepat terlihat), cache sebagai cadangan saat offline.
 self.addEventListener('fetch', (e) => {
-  if (e.request.method !== 'GET' || new URL(e.request.url).origin !== location.origin) return;
+  const requestUrl = new URL(e.request.url);
+  const localConfigPath = new URL('./js/config.local.js', self.registration.scope).pathname;
+  if (e.request.method !== 'GET' || requestUrl.origin !== location.origin || requestUrl.pathname === localConfigPath) return;
   e.respondWith(
     fetch(e.request, { cache: 'no-store' }).then((res) => {
       const salin = res.clone();
