@@ -19,6 +19,9 @@ test('global process preload is accessible and used by async actions', async () 
   assert.match(html, /id="process-loader"/);
   assert.match(html, /id="process-loader-message"/);
   assert.match(css, /\.process-loader-spinner/);
+  const supabase = await read('../js/supabase.js');
+  assert.match(supabase, /wp:supabase-start/);
+  assert.match(supabase, /wp:supabase-end/);
 });
 
 test('ML readiness, training, and activation are handled automatically in the background', async () => {

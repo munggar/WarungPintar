@@ -25,31 +25,33 @@ const fmtTime = (d) => new Date(d).toLocaleTimeString('id-ID', { hour: '2-digit'
 const pct = (x) => (x * 100).toFixed(1).replace('.', ',') + '%';
 
 let activeLoadingOperations = 0;
-let loadingVisibilityTimer = null;
-function withLoading(task, message = 'Memproses permintaan...') {
+function beginLoading(message = 'Memproses permintaan...') {
   activeLoadingOperations += 1;
   const overlay = $('#process-loader');
   const label = $('#process-loader-message');
-  if (loadingVisibilityTimer) clearTimeout(loadingVisibilityTimer);
-  loadingVisibilityTimer = setTimeout(() => {
-    if (activeLoadingOperations <= 0 || !overlay) return;
-    if (label) label.textContent = message;
-    overlay.hidden = false;
-    document.body.setAttribute('aria-busy', 'true');
-  }, 120);
-
-  return Promise.resolve()
-    .then(task)
-    .finally(() => {
-      activeLoadingOperations = Math.max(0, activeLoadingOperations - 1);
-      if (activeLoadingOperations === 0) {
-        if (loadingVisibilityTimer) clearTimeout(loadingVisibilityTimer);
-        loadingVisibilityTimer = null;
-        if (overlay) overlay.hidden = true;
-        document.body.removeAttribute('aria-busy');
-      }
-    });
+  if (label) label.textContent = message;
+  if (overlay) overlay.hidden = false;
+  document.body.setAttribute('aria-busy', 'true');
 }
+function endLoading() {
+  activeLoadingOperations = Math.max(0, activeLoadingOperations - 1);
+  if (activeLoadingOperations === 0) {
+    const overlay = $('#process-loader');
+    if (overlay) overlay.hidden = true;
+    document.body.removeAttribute('aria-busy');
+  }
+}
+function withLoading(task, message = 'Memproses permintaan...') {
+  beginLoading(message);
+  return Promise.resolve().then(task).finally(endLoading);
+}
+
+// Pantau juga seluruh request Supabase agar operasi yang tidak berasal dari tombol
+// tetap menampilkan preloader global.
+window.addEventListener('wp:supabase-start', (event) => {
+  beginLoading(event.detail?.message || 'Menghubungkan ke server...');
+});
+window.addEventListener('wp:supabase-end', endLoading);
 
 const S = {
   products: [], sales: [], purchases: [], expenses: [], customers: [], debts: [], payments: [], withdrawals: [],
@@ -1290,12 +1292,14 @@ async function addPurchase() {
       submit.disabled = true;
       error.textContent = '';
       try {
-        await db.recordPurchase(purchase, newProduct);
-        finish(true);
-        toast(isNew
-          ? `${target.nama} ditambahkan dengan stok awal ${qty} ${target.satuan}.`
-          : `Stok ${target.nama} bertambah sebanyak ${qty}.`);
-        await refresh();
+        await withLoading(async () => {
+          await db.recordPurchase(purchase, newProduct);
+          finish(true);
+          toast(isNew
+            ? `${target.nama} ditambahkan dengan stok awal ${qty} ${target.satuan}.`
+            : `Stok ${target.nama} bertambah sebanyak ${qty}.`);
+          await refresh();
+        }, 'Menyimpan belanja dan memperbarui data toko...');
       } catch (saveError) {
         console.error('Belanja barang gagal disimpan.', saveError);
         fail(saveError.message || 'Belanja barang gagal disimpan.');

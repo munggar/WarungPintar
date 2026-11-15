@@ -348,6 +348,9 @@ Deno.serve(async (request) => {
     if (ownerOnly && membership.role !== 'owner') {
       return Response.json({ error: 'Aksi ini hanya dapat dilakukan pemilik toko.' }, { status: 403, headers });
     }
+    if (action === 'set_policy') {
+      return Response.json({ error: 'Batas Smart Kasbon sekarang dihitung otomatis dari kesehatan data toko.' }, { status: 410, headers });
+    }
 
     let result: unknown;
     if (action === 'dashboard') {
