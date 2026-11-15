@@ -5,9 +5,10 @@
   "type": "module",
   "license": "MIT",
   "scripts": {
-    "start": "npx --yes serve . -l 8080",
-    "build": "npm run build:scanner",
-    "build:scanner": "esbuild js/barcode-scanner-entry.js --bundle --minify --format=esm --target=es2020 --outfile=js/barcode-scanner.js",
+    "start": "node scripts/serve-production.mjs",
+    "build": "npm test && npm run build:production",
+    "build:scanner": "node ./node_modules/esbuild/bin/esbuild js/barcode-scanner-entry.js --bundle --minify --format=esm --target=es2020 --outfile=js/barcode-scanner.js",
+    "build:production": "node scripts/build-render-production.mjs",
     "build:staging": "node scripts/build-render-staging.mjs",
     "config:check": "node scripts/check-config.js",
     "test": "node --test"
@@ -18,5 +19,8 @@
   "devDependencies": {
     "esbuild": "^0.28.2",
     "fake-indexeddb": "^6.2.6"
+  },
+  "engines": {
+    "node": ">=24.0.0 <25.0.0"
   }
 }

@@ -1,4 +1,25 @@
-/js/config.local.js
-/supabase/.env.local
+# Local credentials and runtime-only configuration
+.env
+.env.*
+!.env.example
+!supabase/.env.local.example
+js/config.local.js
+supabase/.env.local
+supabase/.temp/
+
+# Dependencies, build outputs, and test artifacts
+node_modules/
+dist/
+build/
+coverage/
+.nyc_output/
+.pytest_cache/
+__pycache__/
+*.py[cod]
+*.log
+
+# WarungPintar deployment outputs
 /dist-staging/
 /dist-staging-tmp/
+/dist-production/
+/dist-production-tmp/

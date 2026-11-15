@@ -5,7 +5,7 @@ const INVITE_CODE_PATTERN = /^[0-9a-f]{64}$/i;
 
 export function validateOwnerRegistrationPayload(payload) {
   if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
-    return { ok: false, status: 400, error: 'Data pendaftaran tidak valid.' };
+    return { ok: false, status: 400, code: 'invalid_registration_payload', error: 'Data pendaftaran tidak valid.' };
   }
 
   const email = String(payload.email ?? '').trim().toLowerCase();
@@ -14,16 +14,16 @@ export function validateOwnerRegistrationPayload(payload) {
   const inviteCode = String(payload.invite_code ?? '').trim().toLowerCase();
 
   if (!EMAIL_PATTERN.test(email) || email.length > 254) {
-    return { ok: false, status: 400, error: 'Alamat email tidak valid.' };
+    return { ok: false, status: 400, code: 'invalid_registration_payload', error: 'Alamat email tidak valid.' };
   }
   if (password.length < 8 || password.length > 128) {
-    return { ok: false, status: 400, error: 'Password harus terdiri dari 8 sampai 128 karakter.' };
+    return { ok: false, status: 400, code: 'invalid_registration_payload', error: 'Password harus terdiri dari 8 sampai 128 karakter.' };
   }
   if (storeName.length < 1 || storeName.length > 120) {
-    return { ok: false, status: 400, error: 'Nama toko harus terdiri dari 1 sampai 120 karakter.' };
+    return { ok: false, status: 400, code: 'invalid_registration_payload', error: 'Nama toko harus terdiri dari 1 sampai 120 karakter.' };
   }
   if (!INVITE_CODE_PATTERN.test(inviteCode)) {
-    return { ok: false, status: 403, error: 'Kode undangan tidak valid atau sudah digunakan.' };
+    return { ok: false, status: 403, code: 'owner_invite_invalid', error: 'Kode undangan tidak valid atau sudah digunakan.' };
   }
 
   return { ok: true, value: { email, password, storeName, inviteCode } };
@@ -39,20 +39,10 @@ export async function registerOwnerWithInvite({
   rateLimitSecret,
 }) {
   let reservationId = null;
-  let createdUserId = null;
   let inviteCompleted = false;
+  let preserveReservation = false;
 
   try {
-    const { data: reservation, error: reserveError } = await admin.rpc(
-      'reserve_owner_registration_invite',
-      { p_token: inviteCode, p_email: email },
-    );
-    if (reserveError) throw reserveError;
-    if (typeof reservation !== 'string') {
-      return { status: 403, body: { error: 'Kode undangan tidak valid atau sudah digunakan.' } };
-    }
-    reservationId = reservation;
-
     const emailHash = await emailRateLimitFingerprint(email, rateLimitSecret);
     const { data: registrationAllowed, error: rateLimitError } = await admin.rpc(
       'consume_owner_registration_attempt',
@@ -60,56 +50,148 @@ export async function registerOwnerWithInvite({
     );
     if (rateLimitError) throw rateLimitError;
     if (registrationAllowed !== true) {
-      return { status: 429, body: { error: 'Batas percobaan pendaftaran tercapai. Coba kembali dalam satu jam.' } };
+      return {
+        status: 429,
+        body: {
+          code: 'registration_rate_limited',
+          error: 'Batas percobaan pendaftaran tercapai. Coba kembali dalam satu jam.',
+        },
+      };
     }
 
-    const { data: created, error: createError } = await admin.auth.admin.createUser({
-      email,
-      password,
-      email_confirm: true,
-      user_metadata: {
-        store_name: storeName,
-        warungpintar_empty_vault: true,
-        owner_invite_reservation_id: reservationId,
-      },
-    });
+    const { data: reservation, error: reserveError } = await admin.rpc(
+      'reserve_owner_registration_invite',
+      { p_token: inviteCode, p_email: email },
+    );
+    if (reserveError) throw reserveError;
+    if (typeof reservation !== 'string') {
+      return {
+        status: 403,
+        body: { code: 'owner_invite_invalid', error: 'Kode undangan tidak valid atau sudah digunakan.' },
+      };
+    }
+    reservationId = reservation;
+
+    preserveReservation = true;
+    let created;
+    let createError;
+    try {
+      const response = await admin.auth.admin.createUser({
+        email,
+        password,
+        email_confirm: true,
+        user_metadata: {
+          store_name: storeName,
+          warungpintar_empty_vault: true,
+          owner_invite_reservation_id: reservationId,
+        },
+      });
+      created = response.data;
+      createError = response.error;
+    } catch {
+      return {
+        status: 503,
+        body: {
+          code: 'registration_outcome_unknown',
+          error: 'Hasil pendaftaran belum dapat dipastikan. Jangan mendaftar ulang; coba masuk terlebih dahulu.',
+        },
+      };
+    }
+
     if (createError) {
-      return { status: 400, body: { error: 'Pendaftaran tidak berhasil. Periksa data dan kode undangan.' } };
+      const status = typeof createError.status === 'number' ? createError.status : null;
+      if (status !== null && status >= 400 && status < 500) {
+        preserveReservation = false;
+        return {
+          status: 400,
+          body: {
+            code: 'registration_not_completed',
+            error: 'Pendaftaran tidak berhasil. Jika pernah mendaftar, coba masuk dengan akun yang sama.',
+          },
+        };
+      }
+      return {
+        status: 503,
+        body: {
+          code: 'registration_outcome_unknown',
+          error: 'Hasil pendaftaran belum dapat dipastikan. Jangan mendaftar ulang; coba masuk terlebih dahulu.',
+        },
+      };
     }
-    if (!created?.user?.id) throw new Error('Supabase Auth tidak mengembalikan ID akun baru.');
-    createdUserId = created.user.id;
 
-    const { data: login, error: loginError } = await userClient.auth.signInWithPassword({ email, password });
+    const createdUserId = created?.user?.id;
+    if (!createdUserId) {
+      return {
+        status: 503,
+        body: {
+          code: 'registration_outcome_unknown',
+          error: 'Hasil pendaftaran belum dapat dipastikan. Jangan mendaftar ulang; coba masuk terlebih dahulu.',
+        },
+      };
+    }
+
+    try {
+      const { data: completed, error: completeError } = await admin.rpc(
+        'complete_owner_registration_invite',
+        { p_reservation_id: reservationId, p_user_id: createdUserId },
+      );
+      if (completeError || completed !== true) {
+        return {
+          status: 503,
+          body: {
+            code: 'registration_outcome_unknown',
+            error: 'Hasil pendaftaran belum dapat dipastikan. Jangan mendaftar ulang; coba masuk terlebih dahulu.',
+          },
+        };
+      }
+    } catch {
+      return {
+        status: 503,
+        body: {
+          code: 'registration_outcome_unknown',
+          error: 'Hasil pendaftaran belum dapat dipastikan. Jangan mendaftar ulang; coba masuk terlebih dahulu.',
+        },
+      };
+    }
+    inviteCompleted = true;
+
+    let login;
+    let loginError;
+    try {
+      const response = await userClient.auth.signInWithPassword({ email, password });
+      login = response.data;
+      loginError = response.error;
+    } catch {
+      return {
+        status: 503,
+        body: {
+          code: 'registration_session_unavailable',
+          error: 'Akun mungkin sudah dibuat, tetapi sesi login belum tersedia. Jangan mendaftar ulang; coba masuk.',
+        },
+      };
+    }
     if (loginError || !login?.session) {
       return {
         status: 503,
         body: {
           code: 'registration_session_unavailable',
-          error: 'Pendaftaran belum dapat diselesaikan karena sesi login tidak tersedia.',
+          error: 'Akun mungkin sudah dibuat, tetapi sesi login belum tersedia. Jangan mendaftar ulang; coba masuk.',
         },
       };
     }
 
-    const { data: completed, error: completeError } = await admin.rpc(
-      'complete_owner_registration_invite',
-      { p_reservation_id: reservationId, p_user_id: createdUserId },
-    );
-    if (completeError) throw completeError;
-    if (completed !== true) throw new Error('Reservasi kode undangan kedaluwarsa sebelum selesai.');
-    inviteCompleted = true;
-
     return { status: 200, body: login.session };
   } finally {
-    if (createdUserId && !inviteCompleted) {
-      const { error: cleanupError } = await admin.auth.admin.deleteUser(createdUserId);
-      if (cleanupError) console.error('Pembersihan akun pendaftaran gagal:', cleanupError.message);
-    }
-    if (reservationId && !inviteCompleted) {
-      const { error: releaseError } = await admin.rpc(
-        'release_owner_registration_invite',
-        { p_reservation_id: reservationId },
-      );
-      if (releaseError) console.error('Pelepasan reservasi kode undangan gagal:', releaseError.message);
+    if (reservationId && !inviteCompleted && !preserveReservation) {
+      try {
+        const { error: releaseError } = await admin.rpc(
+          'release_owner_registration_invite',
+          { p_reservation_id: reservationId },
+        );
+        if (releaseError) console.error('Pelepasan reservasi pendaftaran pemilik gagal.');
+      } catch {
+        console.error('Pelepasan reservasi pendaftaran pemilik gagal.');
+      }
     }
   }
 }

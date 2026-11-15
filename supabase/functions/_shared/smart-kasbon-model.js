@@ -177,6 +177,10 @@ export function buildSmartKasbonTrainingDataset(loans, payments, asOf = Date.now
       exclude('invalid_payment_record');
       continue;
     }
+    if (payment.reversed_at != null) {
+      exclude('reversed_payment');
+      continue;
+    }
     const amount = Number(payment.amount);
     const paidAt = Date.parse(payment.paid_at);
     const list = paymentsByLoan.get(payment.loan_id) ?? [];
@@ -205,6 +209,10 @@ export function buildSmartKasbonTrainingDataset(loans, payments, asOf = Date.now
     }
     if (loan.status !== 'active') {
       exclude('unsupported_loan_status');
+      continue;
+    }
+    if (loan.decision_features?.synthetic_demo) {
+      exclude('synthetic_demo_source');
       continue;
     }
     const dueDeadline = jakartaDueDeadline(loan.due_date);
@@ -404,6 +412,14 @@ export function validateSmartKasbonModelArtifact(artifact) {
     || new Date(Date.parse(artifact.trained_at)).toISOString() !== artifact.trained_at) {
     throw new TypeError('Model artifact parameters are invalid.');
   }
+}
+
+/** @param {Readonly<SmartKasbonModelMinimums>} [minimums] */
+export function isSmartKasbonModelProductionEligible(metrics, minimums = SMART_KASBON_MODEL_MINIMUMS) {
+  if (metrics?.training_source !== 'store_ledger_v1'
+    || !Number.isSafeInteger(metrics.synthetic_demo_excluded)
+    || metrics.synthetic_demo_excluded < 0) return false;
+  return isSmartKasbonModelEvaluationEligible(metrics, minimums);
 }
 
 /** @param {Readonly<SmartKasbonModelMinimums>} [minimums] */

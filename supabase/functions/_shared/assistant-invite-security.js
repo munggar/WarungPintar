@@ -3,6 +3,17 @@ import { emailRateLimitFingerprint, hashAccountCode } from './account-recovery-s
 const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const CODE_PATTERN = /^[0-9a-f]{64}$/i;
 
+function isDefinitiveAuthRejection(error) {
+  const status = Number(error?.status ?? error?.statusCode);
+  const code = String(error?.code ?? '').toLowerCase();
+  return status === 422 && [
+    'email_exists',
+    'phone_exists',
+    'user_already_exists',
+    'identity_already_exists',
+  ].includes(code);
+}
+
 export function validateAssistantRegistrationPayload(payload) {
   if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
     return { ok: false, status: 400, error: 'Data pendaftaran asisten tidak valid.' };
@@ -32,6 +43,7 @@ export async function registerAssistantWithInvite({
 }) {
   let reservationId = null;
   let createdUserId = null;
+  let authCreationOutcomeUnknown = false;
   let inviteCompleted = false;
   try {
     const codeHash = await hashAccountCode(inviteCode);
@@ -55,6 +67,9 @@ export async function registerAssistantWithInvite({
       return { status: 429, body: { error: 'Batas percobaan pendaftaran tercapai. Coba kembali dalam satu jam.' } };
     }
 
+    // Once the network request starts, a lost/ambiguous response must not release
+    // the one-time invitation: Auth may have created the user and fired its trigger.
+    authCreationOutcomeUnknown = true;
     const { data: created, error: createError } = await admin.auth.admin.createUser({
       email,
       password,
@@ -62,10 +77,20 @@ export async function registerAssistantWithInvite({
       user_metadata: { assistant_invite_reservation_id: reservationId },
     });
     if (createError) {
-      return { status: 400, body: { error: 'Pendaftaran tidak berhasil. Periksa data dan kode undangan.' } };
+      if (isDefinitiveAuthRejection(createError)) authCreationOutcomeUnknown = false;
+      return {
+        status: isDefinitiveAuthRejection(createError) ? 400 : 503,
+        body: {
+          code: isDefinitiveAuthRejection(createError) ? 'registration_rejected' : 'registration_outcome_unknown',
+          error: isDefinitiveAuthRejection(createError)
+            ? 'Pendaftaran tidak berhasil. Periksa data dan kode undangan.'
+            : 'Status pendaftaran belum dapat dipastikan. Kode undangan ditahan sementara untuk mencegah pemakaian ganda.',
+        },
+      };
     }
     if (!created?.user?.id) throw new Error('Supabase Auth tidak mengembalikan ID akun asisten.');
     createdUserId = created.user.id;
+    authCreationOutcomeUnknown = false;
 
     const { data: login, error: loginError } = await userClient.auth.signInWithPassword({ email, password });
     if (loginError || !login?.session) {
@@ -87,16 +112,33 @@ export async function registerAssistantWithInvite({
     inviteCompleted = true;
     return { status: 200, body: login.session };
   } finally {
+    let reservationCanBeReleased = !authCreationOutcomeUnknown;
     if (createdUserId && !inviteCompleted) {
-      const { error: cleanupError } = await admin.auth.admin.deleteUser(createdUserId);
-      if (cleanupError) console.error('Pembersihan akun asisten gagal:', cleanupError.message);
+      try {
+        const { error: cleanupError } = await admin.auth.admin.deleteUser(createdUserId);
+        if (cleanupError) {
+          reservationCanBeReleased = false;
+          console.error('Pembersihan akun asisten gagal; reservasi dipertahankan sampai kedaluwarsa:', cleanupError.message);
+        } else {
+          reservationCanBeReleased = true;
+        }
+      } catch (cleanupError) {
+        reservationCanBeReleased = false;
+        console.error('Hasil pembersihan akun asisten tidak diketahui; reservasi dipertahankan sampai kedaluwarsa:',
+          cleanupError instanceof Error ? cleanupError.name : 'UnknownError');
+      }
     }
-    if (reservationId && !inviteCompleted) {
-      const { error: releaseError } = await admin.rpc(
-        'release_store_invite',
-        { p_reservation_id: reservationId },
-      );
-      if (releaseError) console.error('Pelepasan reservasi kode undangan asisten gagal:', releaseError.message);
+    if (reservationId && !inviteCompleted && reservationCanBeReleased) {
+      try {
+        const { error: releaseError } = await admin.rpc(
+          'release_store_invite',
+          { p_reservation_id: reservationId },
+        );
+        if (releaseError) console.error('Pelepasan reservasi kode undangan asisten gagal:', releaseError.message);
+      } catch (releaseError) {
+        console.error('Pelepasan reservasi kode undangan asisten gagal:',
+          releaseError instanceof Error ? releaseError.name : 'UnknownError');
+      }
     }
   }
 }

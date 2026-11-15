@@ -1,9 +1,11 @@
 import { createClient, type SupabaseClient } from 'https://esm.sh/@supabase/supabase-js@2';
 import { validatedSmartKasbonTimestamp } from '../../../js/logic.js';
+import { buildCorsHeaders } from '../_shared/cors.js';
 import {
   assessSmartKasbonDataset,
   buildSmartKasbonTrainingDataset,
   isSmartKasbonModelEvaluationEligible,
+  isSmartKasbonModelProductionEligible,
   predictSmartKasbonHybrid,
   predictSmartKasbonRuleBased,
   resolveSmartKasbonModelMinimums,
@@ -11,6 +13,7 @@ import {
   trainAndEvaluateSmartKasbonModel,
   validateSmartKasbonModelArtifact,
 } from '../_shared/smart-kasbon-model.js';
+import { persistSmartKasbonPrediction } from '../_shared/smart-kasbon-decision.js';
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const MODEL_VERSION_PATTERN = /^sklr-v1-\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
@@ -41,19 +44,6 @@ type ActiveSmartKasbonModel = {
   training_count: number;
   evaluation_count: number;
 };
-
-function corsHeaders(request: Request) {
-  const origin = request.headers.get('Origin') ?? '';
-  const appUrl = Deno.env.get('APP_URL');
-  const allowedOrigin = appUrl ? new URL(appUrl).origin : '';
-  const localOrigin = /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin);
-  return {
-    'Access-Control-Allow-Origin': origin === allowedOrigin || localOrigin ? origin : allowedOrigin,
-    'Access-Control-Allow-Headers': 'authorization, apikey, content-type, x-client-info',
-    'Access-Control-Allow-Methods': 'POST, OPTIONS',
-    'Vary': 'Origin',
-  };
-}
 
 function uuid(value: unknown, label: string) {
   const text = String(value ?? '');
@@ -187,7 +177,8 @@ async function loadModelDataset(admin: AdminClient, storeId: string) {
     if (loanIds.length) {
       for (let paymentOffset = 0; ; paymentOffset += 1000) {
         const { data: paymentRows, error: paymentError } = await admin.from('smart_kasbon_payments')
-          .select('id,loan_id,amount,paid_at').eq('store_id', storeId).in('loan_id', loanIds)
+          .select('id,loan_id,amount,paid_at,reversed_at').eq('store_id', storeId)
+          .is('reversed_at', null).in('loan_id', loanIds)
           .order('paid_at', { ascending: true }).order('id', { ascending: true })
           .range(paymentOffset, paymentOffset + 999);
         if (paymentError) throw paymentError;
@@ -264,6 +255,9 @@ async function advisoryPrediction(
       });
     }
     const minimums = configuredModelMinimums();
+    if (!isSmartKasbonModelProductionEligible(activeModel.metrics, minimums)) {
+      throw new TypeError('Active Smart Kasbon model has no verified production training provenance.');
+    }
     const features = smartKasbonFeatureVector({
       amount,
       due_date: dueDate,
@@ -312,7 +306,15 @@ async function advisoryPrediction(
 }
 
 Deno.serve(async (request) => {
-  const headers = corsHeaders(request);
+  let cors: ReturnType<typeof buildCorsHeaders>;
+  try {
+    cors = buildCorsHeaders(request, Deno.env.get('APP_URL'), Deno.env.get('APP_ALLOWED_ORIGINS'));
+  } catch (error) {
+    console.error('CORS configuration is invalid.', error instanceof Error ? error.message : 'Unknown error.');
+    return Response.json({ error: 'Fungsi Smart Kasbon belum dikonfigurasi.' }, { status: 503 });
+  }
+  const { headers, originAllowed } = cors;
+  if (!originAllowed) return Response.json({ error: 'Origin tidak diizinkan.' }, { status: 403, headers });
   if (request.method === 'OPTIONS') return new Response('ok', { headers });
   if (request.method !== 'POST') return Response.json({ error: 'Method not allowed.' }, { status: 405, headers });
 
@@ -406,7 +408,7 @@ Deno.serve(async (request) => {
         try {
           validateSmartKasbonModelArtifact(activeModel.model);
           if (activeModel.model.feature_version !== activeModel.feature_version
-            || !isSmartKasbonModelEvaluationEligible(activeModel.metrics, minimums)) {
+            || !isSmartKasbonModelProductionEligible(activeModel.metrics, minimums)) {
             throw new TypeError('Active model eligibility or artifact metadata is invalid.');
           }
         } catch (error) {
@@ -504,9 +506,12 @@ Deno.serve(async (request) => {
               };
             } else {
               validateSmartKasbonModelArtifact(training.model);
-              if (!isSmartKasbonModelEvaluationEligible(training.metrics, minimums)) {
-                training.metrics.activation_eligible = false;
-              }
+              training.metrics.training_source = 'store_ledger_v1';
+              training.metrics.synthetic_demo_excluded = dataset.exclusions.synthetic_demo_source ?? 0;
+              training.metrics.activation_eligible = isSmartKasbonModelProductionEligible({
+                ...training.metrics,
+                activation_eligible: true,
+              }, minimums);
               const { error: insertError } = await admin.from('smart_kasbon_model_versions').insert({
                 store_id: storeId,
                 version: training.model.version,
@@ -560,7 +565,7 @@ Deno.serve(async (request) => {
       if (!candidate) throw new ValidationError('Kandidat model tidak ditemukan atau sudah berubah status.');
       validateSmartKasbonModelArtifact(candidate.model);
       if (candidate.model.feature_version !== candidate.feature_version
-        || !isSmartKasbonModelEvaluationEligible(candidate.metrics, configuredModelMinimums())) {
+        || !isSmartKasbonModelProductionEligible(candidate.metrics, configuredModelMinimums())) {
         throw new ValidationError('Kandidat model belum memenuhi syarat aktivasi advisory.');
       }
       const { data: activated, error: activateError } = await admin.rpc('activate_smart_kasbon_model', {
@@ -618,24 +623,36 @@ Deno.serve(async (request) => {
       result = data;
       if (action === 'issue' && data && typeof data === 'object' && !Array.isArray(data)) {
         const decision = data as Record<string, unknown>;
-        const modelPrediction = decision.approved === true
-          ? await advisoryPrediction(
+        let modelPrediction: unknown;
+        if (Object.prototype.hasOwnProperty.call(decision, 'model_prediction')) {
+          modelPrediction = decision.model_prediction;
+        } else if (decision.approved === true) {
+          modelPrediction = await advisoryPrediction(
             admin,
             storeId,
             String(rpcPayload.loan_id),
             decision,
             Number(rpcPayload.amount),
             String(rpcPayload.due_date),
-          )
-          : {
+          );
+        } else {
+          modelPrediction = {
             method: 'not_run',
             state: 'not_run',
             reason: 'Permintaan tidak disetujui oleh aturan batas kasbon.',
             advisory_only: true,
           };
+        }
+        const persisted = await persistSmartKasbonPrediction(
+          admin,
+          storeId,
+          String(rpcPayload.loan_id),
+          decision,
+          modelPrediction,
+        );
         result = {
-          ...decision,
-          model_prediction: modelPrediction,
+          ...persisted.decision,
+          model_prediction: persisted.prediction,
         };
       }
     }

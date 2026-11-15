@@ -3,30 +3,18 @@ import {
   registerAssistantWithInvite,
   validateAssistantRegistrationPayload,
 } from '../_shared/assistant-invite-security.js';
-
-function corsHeaders(request: Request) {
-  const origin = request.headers.get('Origin') ?? '';
-  const appUrl = Deno.env.get('APP_URL');
-  if (!appUrl) throw new Error('APP_URL belum dikonfigurasi.');
-  const allowedOrigin = new URL(appUrl).origin;
-  const localOrigin = /^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin);
-  if (origin && origin !== allowedOrigin && !localOrigin) throw new Error('Origin tidak diizinkan.');
-  return {
-    'Access-Control-Allow-Origin': origin || allowedOrigin,
-    'Access-Control-Allow-Headers': 'authorization, apikey, content-type, x-client-info',
-    'Access-Control-Allow-Methods': 'POST, OPTIONS',
-    'Vary': 'Origin',
-  };
-}
+import { buildCorsHeaders } from '../_shared/cors.js';
 
 Deno.serve(async (request) => {
-  let headers: Record<string, string>;
+  let cors: ReturnType<typeof buildCorsHeaders>;
   try {
-    headers = corsHeaders(request);
+    cors = buildCorsHeaders(request, Deno.env.get('APP_URL'), Deno.env.get('APP_ALLOWED_ORIGINS'));
   } catch (error) {
-    const forbidden = error instanceof Error && error.message === 'Origin tidak diizinkan.';
-    return Response.json({ error: forbidden ? 'Origin tidak diizinkan.' : 'Fungsi pendaftaran asisten belum dikonfigurasi.' }, { status: forbidden ? 403 : 503 });
+    console.error('CORS configuration is invalid.', error instanceof Error ? error.message : 'Unknown error.');
+    return Response.json({ error: 'Fungsi pendaftaran asisten belum dikonfigurasi.' }, { status: 503 });
   }
+  const { headers, originAllowed } = cors;
+  if (!originAllowed) return Response.json({ error: 'Origin tidak diizinkan.' }, { status: 403, headers });
   if (request.method === 'OPTIONS') return new Response('ok', { headers });
   if (request.method !== 'POST') return new Response('Method not allowed', { status: 405, headers });
 

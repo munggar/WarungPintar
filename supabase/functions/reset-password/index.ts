@@ -3,33 +3,20 @@ import {
   normalizeEmail,
   recoverAccountWithCode,
 } from '../_shared/account-recovery-security.js';
+import { buildCorsHeaders } from '../_shared/cors.js';
 
 const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
-function responseHeaders(request: Request) {
-  const origin = request.headers.get('Origin') ?? '';
-  const configuredAppUrl = Deno.env.get('APP_URL');
-  if (!configuredAppUrl) throw new Error('APP_URL tidak dikonfigurasi.');
-  const allowedOrigin = new URL(configuredAppUrl).origin;
-  const localOrigin = /^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin);
-  if (origin && origin !== allowedOrigin && !localOrigin) throw new Error('Origin tidak diizinkan.');
-  return {
-    'Access-Control-Allow-Origin': origin || allowedOrigin,
-    'Access-Control-Allow-Headers': 'authorization, apikey, content-type, x-client-info',
-    'Access-Control-Allow-Methods': 'POST, OPTIONS',
-    'Vary': 'Origin',
-  };
-}
-
 Deno.serve(async (request) => {
-  let headers: Record<string, string>;
+  let cors: ReturnType<typeof buildCorsHeaders>;
   try {
-    headers = responseHeaders(request);
+    cors = buildCorsHeaders(request, Deno.env.get('APP_URL'), Deno.env.get('APP_ALLOWED_ORIGINS'));
   } catch (error) {
-    const message = error instanceof Error ? error.message : 'Konfigurasi fungsi tidak valid.';
-    const status = message === 'Origin tidak diizinkan.' ? 403 : 503;
-    return Response.json({ error: status === 403 ? message : 'Layanan pemulihan belum dapat diproses.' }, { status });
+    console.error('CORS configuration is invalid.', error instanceof Error ? error.message : 'Unknown error.');
+    return Response.json({ error: 'Layanan pemulihan belum dapat diproses.' }, { status: 503 });
   }
+  const { headers, originAllowed } = cors;
+  if (!originAllowed) return Response.json({ error: 'Origin tidak diizinkan.' }, { status: 403, headers });
 
   if (request.method === 'OPTIONS') return new Response('ok', { headers });
   if (request.method !== 'POST') return Response.json({ error: 'Method not allowed.' }, { status: 405, headers });
