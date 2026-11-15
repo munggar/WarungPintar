@@ -1,7 +1,21 @@
-import { emailRateLimitFingerprint, hashAccountCode } from './account-recovery-security.js';
+import { emailRateLimitFingerprint } from './account-recovery-security.js';
 
 const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-const CODE_PATTERN = /^[0-9a-f]{64}$/i;
+const ASSISTANT_CODE_PATTERN = /^[a-z0-9_-]{16,128}$/;
+
+export function normalizeAssistantInviteCode(value) {
+  const code = String(value ?? '').normalize('NFKC').trim().toLowerCase();
+  if (!ASSISTANT_CODE_PATTERN.test(code)) {
+    throw new TypeError('Kode undangan asisten harus 16 sampai 128 karakter, hanya huruf, angka, tanda hubung, atau garis bawah.');
+  }
+  return code;
+}
+
+export async function hashAssistantInviteCode(value) {
+  const code = normalizeAssistantInviteCode(value);
+  const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(code)));
+  return [...digest].map((byte) => byte.toString(16).padStart(2, '0')).join('');
+}
 
 function isDefinitiveAuthRejection(error) {
   const status = Number(error?.status ?? error?.statusCode);
@@ -20,15 +34,14 @@ export function validateAssistantRegistrationPayload(payload) {
   }
   const email = String(payload.email ?? '').trim().toLowerCase();
   const password = String(payload.password ?? '');
-  const inviteCode = String(payload.invite_code ?? '').trim().toLowerCase();
+  let inviteCode;
+  try { inviteCode = normalizeAssistantInviteCode(payload.invite_code); }
+  catch { return { ok: false, status: 403, error: 'Kode undangan asisten tidak valid atau sudah digunakan.' }; }
   if (!EMAIL_PATTERN.test(email) || email.length > 254) {
     return { ok: false, status: 400, error: 'Alamat email tidak valid.' };
   }
   if (password.length < 8 || password.length > 128) {
     return { ok: false, status: 400, error: 'Password harus terdiri dari 8 sampai 128 karakter.' };
-  }
-  if (!CODE_PATTERN.test(inviteCode)) {
-    return { ok: false, status: 403, error: 'Kode undangan asisten tidak valid atau sudah digunakan.' };
   }
   return { ok: true, value: { email, password, inviteCode } };
 }
@@ -46,7 +59,7 @@ export async function registerAssistantWithInvite({
   let authCreationOutcomeUnknown = false;
   let inviteCompleted = false;
   try {
-    const codeHash = await hashAccountCode(inviteCode);
+    const codeHash = await hashAssistantInviteCode(inviteCode);
     const { data: reservation, error: reserveError } = await admin.rpc(
       'reserve_store_invite',
       { p_code_hash: codeHash },
