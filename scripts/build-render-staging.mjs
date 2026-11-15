@@ -141,7 +141,7 @@ function toPosixPath(filePath) {
   return filePath.split(path.sep).join('/');
 }
 
-export async function copyJavaScriptModules(sourceDir, outputDir) {
+export async function copyJavaScriptModules(sourceDir, outputDir, { sanitizeProductionConfig = true } = {}) {
   await mkdir(outputDir, { recursive: true });
 
   async function copyDirectory(source, relative = '') {
@@ -159,7 +159,9 @@ export async function copyJavaScriptModules(sourceDir, outputDir) {
       await mkdir(path.dirname(outputPath), { recursive: true });
       if (entry.name === 'config.js') {
         const configSource = await readFile(sourcePath, 'utf8');
-        await writeFile(outputPath, sanitizeProductionConfigSource(configSource));
+        await writeFile(outputPath, sanitizeProductionConfig
+          ? sanitizeProductionConfigSource(configSource)
+          : configSource);
       } else {
         await cp(sourcePath, outputPath);
       }
