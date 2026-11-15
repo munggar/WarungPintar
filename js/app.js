@@ -59,6 +59,7 @@ const S = {
   cart: [], q: '', metode: 'tunai', terima: '', custId: '', jt: '', checkoutInProgress: false,
   processingDebtIds: new Set(),
   smartKasbon: null, smartKasbonLoading: false, smartKasbonMutationInProgress: false, smartKasbonError: '',
+  smartKasbonQuote: null, smartKasbonQuoteLoading: false, smartKasbonQuoteError: '',
   qrisPreview: '', qrisFile: null, qrisStorageError: '',
   receipt: null, oneTimeCode: null,
   recentSalesLimit: 20,
@@ -179,6 +180,62 @@ async function prepareSmartKasbonBackend(expected) {
   await cloud.smartKasbon('sync_finance', {
     financial_snapshot: L.smartKasbonFinancialSnapshot(S),
   });
+}
+
+let smartKasbonQuotePromise = null;
+let smartKasbonQuoteRequestKey = null;
+
+async function fetchSmartKasbonQuote(customerId, force = false) {
+  const expected = cloud.currentContext();
+  if (!customerId || !expected) {
+    S.smartKasbonQuote = null;
+    S.smartKasbonQuoteError = '';
+    S.smartKasbonQuoteLoading = false;
+    renderCart();
+    return null;
+  }
+  const requestKey = `${expected.userId}:${expected.storeId}:${customerId}`;
+  if (!force && S.smartKasbonQuote?.requestKey === requestKey
+    && Date.now() - S.smartKasbonQuote.loadedAt < 30000) return S.smartKasbonQuote;
+  if (smartKasbonQuotePromise && smartKasbonQuoteRequestKey === requestKey) return smartKasbonQuotePromise;
+
+  S.smartKasbonQuote = null;
+  S.smartKasbonQuoteError = '';
+  S.smartKasbonQuoteLoading = true;
+  renderCart();
+
+  const request = (async () => {
+    try {
+      await prepareSmartKasbonBackend(expected);
+      assertSmartKasbonContext(expected);
+      const pseudonymousCustomerId = await L.pseudonymousUuid('customer', customerId, expected.storeId);
+      const quote = await cloud.smartKasbon('quote', { customer_id: pseudonymousCustomerId });
+      assertSmartKasbonContext(expected);
+      if (S.metode === 'kasbon' && S.custId === customerId) {
+        S.smartKasbonQuote = { ...quote, customerId, requestKey, loadedAt: Date.now() };
+      }
+      return quote;
+    } catch (error) {
+      if (cloud.currentContext()?.storeId === expected.storeId
+        && S.metode === 'kasbon' && S.custId === customerId) {
+        S.smartKasbonQuoteError = error.message || 'Batas kasbon pelanggan tidak dapat diperiksa.';
+      }
+      return null;
+    } finally {
+      if (smartKasbonQuotePromise === request) {
+        smartKasbonQuotePromise = null;
+        smartKasbonQuoteRequestKey = null;
+      }
+      if (S.metode === 'kasbon' && S.custId === customerId
+        && cloud.currentContext()?.storeId === expected.storeId) {
+        S.smartKasbonQuoteLoading = false;
+        renderCart();
+      }
+    }
+  })();
+  smartKasbonQuotePromise = request;
+  smartKasbonQuoteRequestKey = requestKey;
+  return request;
 }
 
 async function fetchSmartKasbon(force = false) {
@@ -843,6 +900,29 @@ function renderCart() {
     return `<li class="line"><span>${esc(p.nama)}<small>${rp(p.hargaJual)}</small></span><span class="qty"><button class="btn small" data-act="dec" data-id="${esc(c.id)}" aria-label="Kurangi">−</button><input class="qty-input" type="number" data-cart-qty data-id="${esc(c.id)}" min="1" max="${p.stok}" step="1" inputmode="numeric" value="${c.qty}" aria-label="Jumlah ${esc(p.nama)}" required><button class="btn small" data-act="inc" data-id="${esc(c.id)}" aria-label="Tambah">+</button></span><b data-line-total="${esc(c.id)}">${rp(p.hargaJual * c.qty)}</b></li>`;
   }).join('');
   const custOpts = S.customers.map((c) => [c.id, c.nama]);
+  const selectedQuote = S.smartKasbonQuote?.customerId === S.custId ? S.smartKasbonQuote : null;
+  const quoteAmount = Math.max(0, Number(selectedQuote?.max_new_loan) || 0);
+  const quoteMatchesCustomer = Boolean(selectedQuote && selectedQuote.customerId === S.custId);
+  const quotePanel = !S.custId
+    ? '<p class="muted small">Pilih pelanggan untuk melihat batas kasbon yang dapat diajukan.</p>'
+    : S.smartKasbonQuoteLoading
+      ? '<p class="muted small kasbon-limit-loading">Sedang menghitung batas kasbon pelanggan…</p>'
+      : S.smartKasbonQuoteError
+        ? `<p class="err">${esc(S.smartKasbonQuoteError)}</p>`
+        : quoteMatchesCustomer
+          ? `<section class="kasbon-limit-card" aria-live="polite">
+              <span class="muted small">Maksimal kasbon yang bisa diajukan</span>
+              <strong>${rp(quoteAmount)}</strong>
+              <div class="kasbon-limit-meta">
+                <span>Sisa limit pelanggan: <b>${rp(selectedQuote.customer_remaining)}</b></span>
+                <span>Sisa kapasitas toko: <b>${rp(selectedQuote.shop_remaining)}</b></span>
+              </div>
+              ${quoteAmount <= 0 ? '<p class="err small">Kasbon belum dapat diajukan berdasarkan kondisi toko atau riwayat pelanggan.</p>' : total > quoteAmount ? `<p class="err small">Total keranjang ${rp(total)} melebihi batas yang tersedia ${rp(quoteAmount)}.</p>` : '<p class="muted small">Total keranjang masih dalam batas kasbon yang tersedia.</p>'}
+            </section>`
+          : '<p class="muted small">Memuat batas kasbon pelanggan…</p>';
+  const kasbonCheckoutBlocked = S.metode === 'kasbon'
+    && (!S.custId || S.smartKasbonQuoteLoading || !quoteMatchesCustomer || S.smartKasbonQuoteError
+      || total > quoteAmount || quoteAmount <= 0);
   box.innerHTML = `
     <h2>Keranjang</h2>
     ${S.cart.length ? `<ul class="plain">${rows}</ul>` : '<p class="muted">Pilih produk untuk memulai transaksi.</p>'}
@@ -852,6 +932,7 @@ function renderCart() {
       <div class="chips">${total ? `<button class="btn small" data-act="cash" data-v="${total}">Uang pas</button>` : ''}${[20000, 50000, 100000].map((v) => `<button class="btn small" data-act="cash" data-v="${v}">${rp(v)}</button>`).join('')}</div><p id="kembali" class="kembali"></p>` : ''}
     ${S.metode === 'transfer' ? `<section class="transfer-payment" aria-label="Informasi rekening transfer"><h3>Informasi rekening toko</h3>${transferAccountDetails()}<p class="muted small">Pastikan pembayaran telah diterima sebelum menyelesaikan transaksi.</p></section>` : ''}
     ${S.metode === 'kasbon' ? `<label class="field"><span>Pelanggan</span><select id="custsel"><option value="">Pilih pelanggan</option>${custOpts.map(([v, l]) => `<option value="${esc(v)}"${v === S.custId ? ' selected' : ''}>${esc(l)}</option>`).join('')}</select></label>
+      ${quotePanel}
       <button class="btn small" data-act="newcust">Tambah pelanggan baru</button>
       <label class="field"><span>Tanggal jatuh tempo</span><input id="jt" type="date" value="${esc(S.jt)}"></label>` : ''}
     ${S.metode === 'qris' ? (() => {
@@ -871,7 +952,7 @@ function renderCart() {
         ? `<img class="qris-preview" src="${esc(S.cfg.qrisImage)}" alt="QRIS toko"><p class="muted small">Pelanggan dapat membayar dengan QRIS statis setelah transaksi disimpan. Kasir perlu memverifikasi pembayaran secara manual.</p>`
         : '<p class="err">QRIS belum tersedia. Silakan hubungi pemilik usaha untuk menambahkan QRIS terlebih dahulu.</p>';
     })() : ''}
-    <button class="btn primary big" data-act="checkout" ${S.cart.length && !S.checkoutInProgress && (S.metode !== 'qris' || (S.cfg.qrisImage && !S.qrisPreview)) ? '' : 'disabled'}>${S.checkoutInProgress ? 'Menyimpan transaksi…' : 'Simpan transaksi'}</button>
+    <button class="btn primary big" data-act="checkout" ${S.cart.length && !S.checkoutInProgress && (S.metode !== 'qris' || (S.cfg.qrisImage && !S.qrisPreview)) && !kasbonCheckoutBlocked ? '' : 'disabled'}>${S.checkoutInProgress ? 'Menyimpan transaksi…' : 'Simpan transaksi'}</button>
     ${S.cart.length ? '<button class="btn ghost small" data-act="clearcart">Kosongkan keranjang</button>' : ''}`;
   const received = $('#terima');
   if (received) bindRupiahInput(received, (value) => {
@@ -915,6 +996,15 @@ function updateCartQuantityInput(input, commit = false) {
   if (line) line.textContent = rp(product.hargaJual * quantity);
   const total = $('#cart [data-cart-total]');
   if (total) total.textContent = rp(cartTotal());
+  const checkoutButton = $('#cart [data-act="checkout"]');
+  if (checkoutButton) {
+    const quote = S.smartKasbonQuote?.customerId === S.custId ? S.smartKasbonQuote : null;
+    const limit = Math.max(0, Number(quote?.max_new_loan) || 0);
+    checkoutButton.disabled = !S.cart.length || S.checkoutInProgress
+      || (S.metode === 'qris' && (!S.cfg.qrisImage || Boolean(S.qrisPreview)))
+      || (S.metode === 'kasbon' && (!quote || S.smartKasbonQuoteLoading
+        || Boolean(S.smartKasbonQuoteError) || cartTotal() > limit || limit <= 0));
+  }
   updateKembali();
 }
 
@@ -1792,7 +1882,11 @@ const A = {
   inc: (d) => addToCart(d.id),
   dec: (d) => { const c = S.cart.find((x) => x.id === d.id); if (!c) return; if (--c.qty <= 0) S.cart = S.cart.filter((x) => x !== c); renderCart(); },
   clearcart: () => { S.cart = []; renderCart(); },
-  metode: (d) => { S.metode = d.m; renderCart(); },
+  metode: async (d) => {
+    S.metode = d.m;
+    if (d.m === 'kasbon' && S.custId) await fetchSmartKasbonQuote(S.custId, true);
+    else renderCart();
+  },
   cash: (d) => { S.terima = d.v; renderCart(); },
   checkout,
   'more-recent-sales': () => { S.recentSalesLimit += 20; renderRecentSales(); },
@@ -1924,7 +2018,7 @@ const A = {
     render();
     toast('QRIS toko dihapus.');
   },
-  newcust: async () => { const c = await newCustomer(); if (c) { S.custId = c.id; renderCart(); } },
+  newcust: async () => { const c = await newCustomer(); if (c) { S.custId = c.id; await fetchSmartKasbonQuote(c.id, true); } },
   newcust2: async () => { if (await newCustomer()) { toast('Pelanggan ditambahkan.'); render(); } },
   addprod: () => productForm(null),
   editprod: (d) => productForm(S.products.find((p) => p.id === d.id)),
@@ -2144,7 +2238,10 @@ document.addEventListener('input', (e) => {
 document.addEventListener('change', (e) => {
   const t = e.target;
   if (t.matches?.('[data-cart-qty]')) updateCartQuantityInput(t, true);
-  else if (t.id === 'custsel') S.custId = t.value;
+  else if (t.id === 'custsel') {
+    S.custId = t.value;
+    if (S.metode === 'kasbon') void fetchSmartKasbonQuote(t.value, true);
+  }
   else if (t.id === 'assistant-invite-timing') {
     const field = $('#assistant-invite-code-field');
     const input = field?.querySelector('input[name="assistantInviteCode"]');
