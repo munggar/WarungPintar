@@ -1,5 +1,6 @@
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
-import { createAccountRecoveryCode, hashAccountCode } from '../_shared/account-recovery-security.js';
+import { createAccountRecoveryCode } from '../_shared/account-recovery-security.js';
+import { hashAssistantInviteCode, normalizeAssistantInviteCode } from '../_shared/assistant-invite-security.js';
 import { buildCorsHeaders } from '../_shared/cors.js';
 
 Deno.serve(async (request) => {
