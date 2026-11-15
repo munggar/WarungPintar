@@ -71,8 +71,11 @@ Deno.serve(async (request) => {
       ...validated.value,
     });
     return jsonResponse(result.body, result.status, headers);
-  } catch {
-    console.error('Pendaftaran pemilik gagal diproses.');
+  } catch (error) {
+    const diagnosticCode = error && typeof error === 'object'
+      ? String(error.code ?? error.name ?? 'UnknownError')
+      : 'UnknownError';
+    console.error('Pendaftaran pemilik gagal diproses:', diagnosticCode);
     return jsonResponse(
       { code: 'registration_unavailable', error: 'Pendaftaran belum dapat diproses.' },
       503,

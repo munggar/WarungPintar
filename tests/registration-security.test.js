@@ -1,6 +1,7 @@
 import { readFile } from 'node:fs/promises';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { hashAccountCode } from '../supabase/functions/_shared/account-recovery-security.js';
 import {
   registerOwner,
   validateOwnerRegistrationPayload,
@@ -31,6 +32,7 @@ function createClients({
     async rpc(name, payload) {
       calls.push({ type: 'rpc', name, payload });
       if (name === 'consume_owner_registration_attempt') return { data: registrationAllowed, error: null };
+      if (name === 'create_internal_owner_registration_invite') return { data: true, error: null };
       if (name === 'reserve_owner_registration_invite') return { data: 'legacy-reservation', error: null };
       if (name === 'complete_owner_registration_invite') return { data: true, error: null };
       if (name === 'release_owner_registration_invite') return { data: true, error: null };
@@ -81,7 +83,7 @@ test('validates owner registration without an administrator invite and ignores c
   assert.equal(validateOwnerRegistrationPayload({ ...validPayload, store_name: '' }).status, 400);
 });
 
-test('owner registration rate-limits, sets a server-only owner marker, and creates an immediate password session', async () => {
+test('owner registration rate-limits, reserves a server-issued one-time invite, and creates a password session', async () => {
   const parsed = validateOwnerRegistrationPayload(validPayload);
   const { admin, userClient, calls } = createClients();
 
@@ -101,16 +103,26 @@ test('owner registration rate-limits, sets a server-only owner marker, and creat
   assert.deepEqual(createCall.attributes.user_metadata, {
     store_name: 'Warung A',
     warungpintar_empty_vault: true,
+    owner_invite_reservation_id: 'legacy-reservation',
   });
-  assert.deepEqual(createCall.attributes.app_metadata, {
-    warungpintar_account_type: 'owner',
-  });
+  assert.equal(createCall.attributes.app_metadata, undefined);
   assert.equal(createCall.attributes.email_confirm, true);
-  assert.deepEqual(calls.map((call) => call.type), ['rpc', 'createUser', 'signInWithPassword']);
+  assert.deepEqual(calls.map((call) => call.type), [
+    'rpc', 'rpc', 'rpc', 'createUser', 'rpc', 'signInWithPassword',
+  ]);
   assert.deepEqual(calls.filter((call) => call.type === 'rpc').map((call) => call.name), [
     'consume_owner_registration_attempt',
+    'create_internal_owner_registration_invite',
+    'reserve_owner_registration_invite',
+    'complete_owner_registration_invite',
   ]);
-  assert.equal(calls.filter((call) => call.type === 'rpc').some((call) => call.name.includes('owner_invite')), false);
+  const internalInvite = calls.find((call) => call.name === 'create_internal_owner_registration_invite');
+  assert.equal(internalInvite.payload.p_email, 'owner@example.com');
+  assert.match(internalInvite.payload.p_token_hash, /^[0-9a-f]{64}$/);
+  const reservation = calls.find((call) => call.name === 'reserve_owner_registration_invite');
+  assert.equal(reservation.payload.p_email, 'owner@example.com');
+  assert.match(reservation.payload.p_token, /^[0-9a-f]{64}$/);
+  assert.equal(internalInvite.payload.p_token_hash, await hashAccountCode(reservation.payload.p_token));
 });
 
 test('owner registration rate limit blocks Auth user creation', async () => {
@@ -141,8 +153,9 @@ test('duplicate or invalid Auth account creation returns a safe rejection withou
     ...validateOwnerRegistrationPayload(validPayload).value,
   });
   assert.equal(result.status, 400);
-  assert.equal(result.body.code, 'registration_not_completed');
+  assert.equal(result.body.code, 'email_already_registered');
   assert.equal(calls.some((call) => call.type === 'signInWithPassword'), false);
+  assert.equal(calls.some((call) => call.name === 'release_owner_registration_invite'), true);
 });
 
 test('ambiguous Auth create result is not compensated or retried automatically', async () => {
@@ -157,6 +170,7 @@ test('ambiguous Auth create result is not compensated or retried automatically',
   assert.equal(result.body.code, 'registration_outcome_unknown');
   assert.equal(calls.some((call) => call.type === 'signInWithPassword'), false);
   assert.equal(calls.some((call) => call.type === 'deleteUser'), false);
+  assert.equal(calls.some((call) => call.name === 'release_owner_registration_invite'), false);
 });
 
 test('account is not deleted if password session issuance fails after Auth creation', async () => {
@@ -172,6 +186,7 @@ test('account is not deleted if password session issuance fails after Auth creat
   assert.equal(result.status, 503);
   assert.equal(result.body.code, 'registration_session_unavailable');
   assert.equal(calls.some((call) => call.type === 'deleteUser'), false);
+  assert.equal(calls.some((call) => call.name === 'complete_owner_registration_invite'), true);
 });
 
 test('legacy cached owner signup can finish a previously issued invitation during rollout', async () => {
