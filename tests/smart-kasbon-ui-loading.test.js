@@ -25,6 +25,12 @@ test('Kasir cart quantity can be typed and is validated against current stock', 
   assert.ok(app.includes('data-cart-total'));
 });
 
+test('Kasbon payment uses the field expected by the backend UUID validator', async () => {
+  const app = await read('../js/app.js');
+  assert.match(app, /const backendPayment = \{\s*id: paymentId,\s*loan_id:/);
+  assert.ok(app.includes("'payment', { payment: backendPayment }"));
+});
+
 test('global process preload is accessible and used by async and Supabase operations', async () => {
   const [app, html, css, supabase] = await Promise.all([
     read('../js/app.js'), read('../index.html'), read('../css/style.css'), read('../js/supabase.js'),
