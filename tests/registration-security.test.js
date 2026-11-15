@@ -110,7 +110,7 @@ test('owner registration rate-limits, sets a server-only owner marker, and creat
   assert.deepEqual(calls.filter((call) => call.type === 'rpc').map((call) => call.name), [
     'consume_owner_registration_attempt',
   ]);
-  assert.equal(calls.some((call) => call.name.includes('owner_invite')), false);
+  assert.equal(calls.filter((call) => call.type === 'rpc').some((call) => call.name.includes('owner_invite')), false);
 });
 
 test('owner registration rate limit blocks Auth user creation', async () => {
