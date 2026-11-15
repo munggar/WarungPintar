@@ -1,6 +1,6 @@
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
 import {
-  registerOwnerWithInvite,
+  registerOwner,
   validateOwnerRegistrationPayload,
 } from '../_shared/registration-security.js';
 import { buildCorsHeaders } from '../_shared/cors.js';
@@ -64,7 +64,7 @@ Deno.serve(async (request) => {
     }
 
     const userClient = createClient(supabaseUrl, anonKey, { auth: { persistSession: false } });
-    const result = await registerOwnerWithInvite({
+    const result = await registerOwner({
       admin,
       userClient,
       rateLimitSecret: Deno.env.get('RESET_RATE_LIMIT_SECRET') ?? '',

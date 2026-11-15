@@ -35,7 +35,7 @@ Beberapa hal yang menjadi fokus pengembangan:
 
 | Fitur | Deskripsi |
 |---|---|
-| Akun pemilik dan asisten | Autentikasi menggunakan Supabase. Pemilik dapat mengundang asisten melalui email. |
+| Akun pemilik dan asisten | Owner mendaftar langsung tanpa kode administrator. Setelah toko dibuat, Owner dapat membuat kode undangan Asisten sekarang atau nanti; Asisten mendaftar dengan kode satu kali dari Owner. |
 | Pengelolaan produk | Mencatat nama, kategori, harga beli dan jual, stok, batas minimum, serta barcode. |
 | Kasir dan pembayaran | Mendukung tunai, transfer, kasbon, serta QRIS statis dengan konfirmasi manual. |
 | Pengelolaan stok | Stok berkurang saat penjualan dan bertambah saat pembelian melalui transaksi atomik. |
@@ -55,7 +55,7 @@ Beberapa hal yang menjadi fokus pengembangan:
 
 | Kode | Fitur | Implementasi | Lokasi di aplikasi |
 |---|---|---|---|
-| F01 | Peran pemilik dan asisten | Akun dikelola melalui Supabase. Pemilik dapat mengundang asisten melalui email dan membagikan kunci pemulihan secara terpisah. | Pengaturan |
+| F01 | Peran pemilik dan asisten | Akun dikelola melalui Supabase. Pemilik dapat menerbitkan kode undangan Asisten sekali pakai dan membagikan Kunci Pemulihan Data secara terpisah. | Pengaturan |
 | F02 | Pengelolaan produk | Nama, kategori, harga beli/jual, stok, batas minimum, dan barcode. | Produk |
 | F03 | Kasir dan pembayaran | Tunai, transfer, kasbon, QRIS statis dengan konfirmasi manual, serta pencarian barcode atau pemindai eksternal. | Kasir |
 | F04 | Pengelolaan stok | Stok berkurang saat penjualan dan bertambah saat pembelian melalui transaksi atomik. | Kasir, Belanja |
@@ -216,15 +216,13 @@ npx supabase config diff --remote=unkmykhwddwhbtuioqrg
 npx supabase config push --remote=unkmykhwddwhbtuioqrg
 ```
 
-Owner hanya dibuat oleh Edge Function `register-owner` setelah kode undangan satu kali terikat-email tervalidasi dan rate limit lolos. Fungsi membuat user melalui Auth Admin dengan `email_confirm: true` agar sesi password langsung tersedia; signup langsung melalui endpoint publik Auth tetap dinonaktifkan. Tidak ada alur confirmation email, reset email, atau undangan email. Email hanya menjadi identifier untuk login dan pemulihan akun.
+Owner dapat mendaftar langsung melalui Edge Function `register-owner` tanpa meminta kode dari administrator. Fungsi memvalidasi email, kata sandi, dan nama toko, menerapkan batas 10 percobaan pendaftaran per email per jam, lalu membuat akun lewat Supabase Auth Admin. Signup langsung melalui endpoint Auth publik tetap dinonaktifkan (`auth.enable_signup = false`); hanya Edge Function server yang dapat membuat akun Owner.
 
-Terapkan migration keamanan akun sebelum deploy fungsi terkait. Setelah migration berhasil, terbitkan undangan owner melalui Supabase SQL Editor sebagai administrator:
+Saat membuat akun, server menambahkan penanda `app_metadata.warungpintar_account_type = 'owner'`. Metadata ini ditulis melalui Auth Admin dan tidak berasal dari form pengguna. Trigger database hanya membuat toko dan keanggotaan `owner` apabila penanda server tersebut ada. Flag `role`, `app_metadata`, atau nama role yang dikirim oleh browser diabaikan; pengguna tidak dapat menaikkan perannya sendiri melalui payload registrasi.
 
-```sql
-select public.create_owner_registration_invite('pemilik@example.com');
-```
+Pada formulir pendaftaran tersedia pilihan **Buat kode undangan Asisten sekarang** atau **Nanti saja**. Jika memilih sekarang, kode dibuat setelah akun Owner dan toko berhasil dibuat, lalu ditampilkan sekali agar dapat disalin atau diunduh. Jika memilih nanti, Owner dapat membuatnya sewaktu-waktu melalui **Pengaturan → Undang asisten**.
 
-Salin kode acak yang dikembalikan dan bagikan kepada orang yang disetujui melalui kanal privat. Kode berlaku 7 hari, terikat ke email tersebut, dan hanya dapat dipakai sekali. Menerbitkan kode baru untuk email yang sama akan membatalkan kode sebelumnya. Kode undangan adalah bearer secret: kebocorannya memungkinkan pihak lain yang memegang kode membuat akun dengan alamat yang disetujui. Karena aplikasi tidak memverifikasi email, kode ini **bukan bukti kepemilikan mailbox**; jangan memperlakukan alamat email sebagai identitas yang sudah diverifikasi. Untuk skala terbuka, pertimbangkan verifikasi nomor telepon atau proses persetujuan identitas terpisah.
+Email confirmation hosted tetap dimatikan agar sesi password dapat langsung dibuat. Karena aplikasi tidak mengirim email verifikasi, alamat email berfungsi sebagai identifier login dan bukan bukti kepemilikan mailbox. Pengguna harus memastikan email yang dimasukkan benar dan menyimpan Account Recovery Code serta Kunci Pemulihan Data secara terpisah. Untuk mencegah penyalahgunaan signup publik pada skala lebih besar, tambahkan verifikasi anti-bot atau persetujuan identitas sebelum membuka layanan secara luas.
 
 Pemilik toko dapat menerbitkan kode undangan asisten dari menu Pengaturan. Kode terikat ke toko, berlaku tujuh hari, disimpan sebagai hash, dapat dicabut, dan hanya dapat digunakan sekali. Calon asisten memilih email login saat menggunakan kode. Jangan membagikan Account Recovery Code dengan Kunci Pemulihan Data: kode pertama mengubah kata sandi akun, sedangkan kode kedua membuka data toko terenkripsi.
 
@@ -352,7 +350,7 @@ Skema Supabase mencakup `stores`, `store_members`, `store_invites`, `store_data`
 - Tautan WhatsApp membuka aplikasi dengan pesan yang telah disiapkan; pengguna tetap perlu meninjau dan mengirim pesan. Lampiran struk tidak dikirim otomatis. Jika fitur berbagi tidak tersedia, unduh berkas dan lampirkan secara manual.
 - Aplikasi tidak mengirim notifikasi push. Peringatan ditampilkan saat aplikasi dibuka.
 - Pemindai kamera belum terintegrasi dengan antarmuka kasir. Kasir mendukung pencarian barcode melalui kolom produk atau pemindai eksternal yang berfungsi sebagai papan ketik.
-- Pendaftaran owner memerlukan undangan satu kali; undangan membatasi pembuatan akun publik, tetapi tidak membuktikan kepemilikan email. Pemulihan akun dibatasi 10 percobaan per email per jam; pemilik yang berbagi jaringan masih dapat mengalami pembatasan pada alamat yang sama.
+- Pendaftaran Owner tidak lagi memerlukan kode administrator. Pembuatan akun tetap melalui Edge Function server, dibatasi 10 percobaan per email per jam, dan trigger database hanya memberi peran Owner berdasarkan penanda server-side pada `app_metadata`. Karena email tidak diverifikasi, alamat email bukan bukti kepemilikan mailbox. Asisten tetap wajib menggunakan kode sekali pakai dari Owner; kode berlaku tujuh hari dan terikat ke toko penerbit.
 - Sesi dan kunci pembuka data disimpan pada perangkat setelah masuk agar aplikasi tidak meminta autentikasi ulang setiap kali dibuka. Gunakan hanya pada perangkat pribadi yang terlindungi. Pengguna lain yang dapat mengakses profil browser berpotensi membuka data toko. Tombol **Keluar** menghapus sesi dan kunci yang tersimpan pada perangkat.
 
 ## Pemecahan Masalah
@@ -361,7 +359,7 @@ Skema Supabase mencakup `stores`, `store_members`, `store_invites`, `store_data`
 |---|---|
 | Halaman kosong atau aplikasi gagal dimulai | Pastikan aplikasi dijalankan melalui server web, bukan `file://`. Coba keluar dari mode privat browser. |
 | Pemindai barcode tidak berfungsi | Jalankan `npm run build`. Sebagai alternatif, cari produk atau gunakan pemindai eksternal melalui kolom Kasir. |
-| Kode pendaftaran ditolak | Pastikan kode belum dipakai/kedaluwarsa dan email yang dimasukkan sama dengan email undangan. Minta admin menerbitkan kode baru. |
+| Pendaftaran Owner gagal | Owner tidak memerlukan kode administrator. Periksa email, kata sandi, nama toko, dan batas percobaan; masuk jika email tersebut sudah memiliki akun. Untuk Asisten, minta Owner membuat kode baru jika kode salah, kedaluwarsa, atau sudah dipakai. |
 | Pendaftaran tidak membuat sesi | Periksa `auth.enable_signup = false` dan `auth.email.enable_confirmations = false` pada konfigurasi hosted, lalu deploy versi Edge Function `register-owner` yang terbaru. Periksa juga status sesi password setelah pembuatan akun. |
 | Akun tidak terlihat di Table Editor | Akun berada di Authentication → Users. Pastikan migrasi basis data telah dijalankan. |
 | Tabel `stores` tidak ditemukan | Jalankan migrasi SQL melalui Supabase Dashboard → SQL Editor, pastikan proses berhasil, lalu coba masuk kembali. |

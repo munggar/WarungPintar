@@ -186,8 +186,46 @@ select throws_ok(
     ''
   ),
   'P0001',
-  'Pendaftaran harus menggunakan kode undangan yang valid.',
-  'new accounts without an owner or assistant invitation are rejected'
+  'Pendaftaran harus melalui alur pemilik atau undangan asisten yang valid.',
+  'accounts without a server-authorized owner marker or assistant invite are rejected'
+);
+select throws_ok(
+  format(
+    'insert into auth.users (id, email, encrypted_password, raw_user_meta_data) values (%L, %L, %L, %L::jsonb)',
+    '99999999-9999-4999-8999-999999999999',
+    'kasbon-spoofed-owner@invalid.test',
+    '',
+    jsonb_build_object('store_name', 'Spoofed Owner', 'warungpintar_account_type', 'owner')::text
+  ),
+  'P0001',
+  'Pendaftaran harus melalui alur pemilik atau undangan asisten yang valid.',
+  'user-controlled metadata cannot grant owner privileges'
+);
+insert into auth.users (
+  id, email, encrypted_password, raw_user_meta_data, raw_app_meta_data
+)
+values (
+  '88888888-8888-4888-8888-888888888888',
+  'kasbon-open-owner@invalid.test',
+  '',
+  jsonb_build_object('store_name', 'Warung Daftar Langsung', 'warungpintar_empty_vault', true),
+  jsonb_build_object(
+    'provider', 'email',
+    'providers', jsonb_build_array('email'),
+    'warungpintar_account_type', 'owner'
+  )
+);
+select ok(
+  exists (
+    select 1
+    from public.stores store
+    join public.store_members member on member.store_id = store.id
+    where store.owner_id = '88888888-8888-4888-8888-888888888888'
+      and member.user_id = '88888888-8888-4888-8888-888888888888'
+      and member.role = 'owner'
+      and store.name = 'Warung Daftar Langsung'
+  ),
+  'server-authorized owner registration automatically creates a store and owner membership'
 );
 select is(
   public.reserve_owner_registration_invite(

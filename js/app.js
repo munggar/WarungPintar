@@ -333,7 +333,7 @@ function renderAuth(message = S.authMessage) {
     <form id="auth-form">
       <label class="field"><span>Email</span><input name="email" type="email" value="${esc(S.authEmail)}" required autocomplete="email"></label>
       ${S.authMode === 'register' ? '<label class="field"><span>Nama toko</span><input name="storeName" required maxlength="120" autocomplete="organization"></label>' : ''}
-      ${registering ? `<label class="field"><span>${assistant ? 'Kode undangan asisten' : 'Kode undangan pendaftaran'}</span><input name="inviteCode" required minlength="64" maxlength="64" pattern="[0-9A-Fa-f]{64}" autocomplete="off" spellcheck="false"><small>${assistant ? 'Masukkan kode yang diberikan pemilik toko. Kode hanya dapat dipakai sekali.' : 'Minta kode satu kali dari administrator WarungPintar.'}</small></label>` : ''}
+      ${assistant ? `<label class="field"><span>Kode undangan asisten</span><input name="inviteCode" required minlength="64" maxlength="64" pattern="[0-9A-Fa-f]{64}" autocomplete="off" spellcheck="false"><small>Masukkan kode yang diberikan pemilik toko. Kode hanya dapat dipakai sekali.</small></label>` : S.authMode === 'register' ? `<label class="field"><span>Undangan Asisten (opsional)</span><select name="assistantInviteTiming"><option value="later" selected>Nanti saja</option><option value="now">Buat kode setelah pendaftaran</option></select><small>Anda bisa membuat kode kapan saja melalui Pengaturan → Undang asisten.</small></label>` : ''}
       <label class="field"><span>Kata sandi</span><input name="password" type="password" required minlength="${registering ? '8' : '6'}" autocomplete="${registering ? 'new-password' : 'current-password'}"><small>${registering ? 'Gunakan kata sandi minimal 8 karakter.' : 'Masukkan kata sandi akun Anda.'}</small></label>
       ${registering ? '<label class="field"><span>Ulangi kata sandi</span><input name="confirmPassword" type="password" required minlength="8" autocomplete="new-password"></label>' : ''}
       ${recovery}
@@ -479,7 +479,6 @@ async function submitAuth(form) {
         email,
         password,
         String(values.storeName || '').trim(),
-        String(values.inviteCode || '').trim(),
       );
       if (!result?.access_token || !result?.refresh_token) {
         S.authMode = 'login';
@@ -494,6 +493,22 @@ async function submitAuth(form) {
       }
       await completeLogin(password, recovery, { startEmpty: true });
       if (recoveryCodeUnavailable) toast('Akun berhasil dibuat, tetapi Account Recovery Code belum terbit. Buat kode dari Pengaturan sebelum keluar.', 'err');
+      if (values.assistantInviteTiming === 'now' && cloud.currentContext()?.role === 'owner') {
+        try {
+          const invite = await cloud.inviteAssistant();
+          if (!invite?.invitation_code) throw new Error('Server tidak mengembalikan kode undangan.');
+          await showOneTimeCode({
+            title: 'Simpan kode undangan asisten',
+            description: 'Bagikan kode ini kepada asisten yang akan bergabung. Kode terikat ke toko ini, berlaku tujuh hari, dan hanya dapat digunakan sekali.',
+            code: invite.invitation_code,
+            expiresAt: invite.expires_at,
+            filename: 'warungpintar-kode-undangan-asisten.txt',
+          });
+        } catch (error) {
+          console.error('Pembuatan kode undangan awal gagal:', error);
+          toast('Akun Owner berhasil dibuat, tetapi kode undangan Asisten belum terbit. Anda bisa membuatnya nanti melalui Pengaturan → Undang asisten.', 'err');
+        }
+      }
       return;
     }
     if (S.authMode === 'assistant') {
