@@ -52,11 +52,24 @@ test('Kasbon customer limit auto-refreshes while the payment method is active', 
   assert.ok(app.includes('setInterval(() => {'));
   assert.ok(app.includes('}, 5000);'));
   assert.ok(app.includes('fetchSmartKasbonQuote(S.custId, true, false)'));
+  assert.ok(app.includes("{ silent: !refreshFinance }"));
   assert.ok(app.includes('S.smartKasbonQuoteRefreshing = hasCurrentQuote'));
   assert.ok(app.includes('Diperbarui pukul'));
   assert.ok(app.includes('pembaruan otomatis setiap 5 detik'));
   assert.ok(app.includes('S.smartKasbonQuoteLoading || S.smartKasbonQuoteRefreshing'));
   assert.ok(app.includes("document.addEventListener('visibilitychange', refreshKasbonQuoteOnResume)"));
+});
+
+test('background Smart Kasbon quote polling does not trigger the global full-screen loader', async () => {
+  const [app, cloud, supabase] = await Promise.all([
+    read('../js/app.js'), read('../js/cloud-sync.js'), read('../js/supabase.js'),
+  ]);
+  assert.ok(app.includes("{ silent: !refreshFinance }"));
+  assert.ok(cloud.includes('export async function smartKasbon(action, payload = {}, options = {})'));
+  assert.ok(cloud.includes('supabase.smartKasbon({ ...payload, action, store_id: context.storeId }, options)'));
+  assert.ok(supabase.includes('const silent = options.silent === true;'));
+  assert.ok(supabase.includes('delete fetchOptions.silent;'));
+  assert.ok(supabase.includes("!silent && typeof window !== 'undefined'"));
 });
 
 test('Owner recalculates the store financial snapshot after local writes and cloud sync changes', async () => {
