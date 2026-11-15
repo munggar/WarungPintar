@@ -35,7 +35,9 @@ Beberapa hal yang menjadi fokus pengembangan:
 
 | Fitur | Deskripsi |
 |---|---|
-| Akun pemilik dan asisten | Owner mendaftar langsung tanpa kode administrator. Setelah toko dibuat, Owner dapat membuat kode undangan Asisten sekarang atau nanti; Asisten mendaftar dengan kode satu kali dari Owner. |
+| Akun pemilik dan asisten | Owner mendaftar langsung tanpa kode administrator. Owner dapat menentukan kode undangan Asisten saat pendaftaran atau membuat kode otomatis nanti; Asisten mendaftar dengan kode satu kali dari Owner. |
+
+Saat pendaftaran Owner, pilihan “Isi kode undangan sekarang” menampilkan kolom kode khusus Asisten. Pilihan “Nanti saja” menyembunyikan kolom tersebut. Kode harus 16–128 karakter (huruf, angka, tanda hubung, garis bawah), berlaku tujuh hari, dan hanya dapat dipakai sekali.
 | Pengelolaan produk | Mencatat nama, kategori, harga beli dan jual, stok, batas minimum, serta barcode. |
 | Kasir dan pembayaran | Mendukung tunai, transfer, kasbon, serta QRIS statis dengan konfirmasi manual. |
 | Pengelolaan stok | Stok berkurang saat penjualan dan bertambah saat pembelian melalui transaksi atomik. |
@@ -167,7 +169,7 @@ Bagian ini adalah alur penerapan **production yang sudah ada**, bukan instruksi 
 npx supabase login
 npx supabase link --project-ref skvskjrhhekwvkwuxjec
 $resetSecret = node -e "process.stdout.write(require('node:crypto').randomBytes(32).toString('hex'))"
-npx supabase secrets set APP_URL="https://warungpintar-ijd1.onrender.com" RESET_RATE_LIMIT_SECRET="$resetSecret"
+npx supabase secrets set APP_URL="https://warungpintar-jjd1.onrender.com" RESET_RATE_LIMIT_SECRET="$resetSecret"
 Remove-Variable resetSecret
 ```
 
@@ -220,7 +222,7 @@ Owner dapat mendaftar langsung melalui Edge Function `register-owner` tanpa memi
 
 Saat membuat akun, server menambahkan penanda `app_metadata.warungpintar_account_type = 'owner'`. Metadata ini ditulis melalui Auth Admin dan tidak berasal dari form pengguna. Trigger database hanya membuat toko dan keanggotaan `owner` apabila penanda server tersebut ada. Flag `role`, `app_metadata`, atau nama role yang dikirim oleh browser diabaikan; pengguna tidak dapat menaikkan perannya sendiri melalui payload registrasi.
 
-Pada formulir pendaftaran tersedia pilihan **Buat kode undangan Asisten sekarang** atau **Nanti saja**. Jika memilih sekarang, kode dibuat setelah akun Owner dan toko berhasil dibuat, lalu ditampilkan sekali agar dapat disalin atau diunduh. Jika memilih nanti, Owner dapat membuatnya sewaktu-waktu melalui **Pengaturan → Undang asisten**.
+Pada formulir pendaftaran tersedia pilihan **Isi kode undangan sekarang** atau **Nanti saja**. Jika memilih sekarang, kolom kode muncul agar Owner dapat menentukan kode sendiri (16–128 karakter, huruf, angka, tanda hubung, atau garis bawah); setelah toko berhasil dibuat, kode di-hash dan didaftarkan sebagai undangan sekali pakai. Jika memilih nanti, kolom tidak ditampilkan dan Owner dapat membuat undangan otomatis melalui **Pengaturan → Undang asisten**.
 
 Email confirmation hosted tetap dimatikan agar sesi password dapat langsung dibuat. Karena aplikasi tidak mengirim email verifikasi, alamat email berfungsi sebagai identifier login dan bukan bukti kepemilikan mailbox. Pengguna harus memastikan email yang dimasukkan benar dan menyimpan Account Recovery Code serta Kunci Pemulihan Data secara terpisah. Untuk mencegah penyalahgunaan signup publik pada skala lebih besar, tambahkan verifikasi anti-bot atau persetujuan identitas sebelum membuka layanan secara luas.
 

@@ -1,5 +1,6 @@
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
-import { createAccountRecoveryCode, hashAccountCode } from '../_shared/account-recovery-security.js';
+import { createAccountRecoveryCode } from '../_shared/account-recovery-security.js';
+import { hashAssistantInviteCode, normalizeAssistantInviteCode } from '../_shared/assistant-invite-security.js';
 import { buildCorsHeaders } from '../_shared/cors.js';
 
 Deno.serve(async (request) => {
@@ -25,8 +26,18 @@ Deno.serve(async (request) => {
 
   try {
     const payload = await request.json();
-    if (!payload || typeof payload !== 'object' || Array.isArray(payload) || payload.email != null) {
-      return Response.json({ error: 'Undangan asisten menggunakan kode, bukan email.' }, { status: 400, headers });
+    if (!payload || typeof payload !== 'object' || Array.isArray(payload)
+      || payload.email != null
+      || (payload.invitation_code != null && typeof payload.invitation_code !== 'string')) {
+      return Response.json({ error: 'Data undangan asisten tidak valid.' }, { status: 400, headers });
+    }
+    let code;
+    try {
+      code = payload.invitation_code?.trim()
+        ? normalizeAssistantInviteCode(payload.invitation_code)
+        : createAccountRecoveryCode();
+    } catch {
+      return Response.json({ error: 'Kode undangan harus 16 sampai 128 karakter, hanya huruf, angka, tanda hubung, atau garis bawah.' }, { status: 400, headers });
     }
 
     const userClient = createClient(url, anonKey, { global: { headers: { Authorization: authorization } } });
@@ -40,13 +51,15 @@ Deno.serve(async (request) => {
     const membership = memberships?.[0];
     if (!membership) return Response.json({ error: 'Hanya pemilik toko yang dapat mengundang asisten.' }, { status: 403, headers });
 
-    const code = createAccountRecoveryCode();
-    const codeHash = await hashAccountCode(code);
+    const codeHash = await hashAssistantInviteCode(code);
     const { data: invite, error: inviteError } = await admin.rpc('create_store_invite', {
       p_store_id: membership.store_id,
       p_invited_by: user.id,
       p_code_hash: codeHash,
     });
+    if (inviteError?.code === '23505') {
+      return Response.json({ error: 'Kode undangan sudah pernah digunakan. Pilih kode yang berbeda.' }, { status: 409, headers });
+    }
     if (inviteError) throw inviteError;
     if (!Array.isArray(invite) || !invite[0]?.expires_at) throw new Error('Database tidak mengembalikan masa berlaku undangan.');
     return Response.json({ invitation_code: code, expires_at: invite[0].expires_at }, { headers });

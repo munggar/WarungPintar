@@ -1,3 +1,4 @@
+import { readFile } from 'node:fs/promises';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
@@ -43,6 +44,10 @@ test('registration stores its immediate session and login uses password grant wi
     if (url.pathname === '/functions/v1/accept-assistant') {
       return new Response(JSON.stringify(assistantSession), { status: 200 });
     }
+    if (url.pathname === '/functions/v1/invite-assistant') {
+      const body = JSON.parse(options.body);
+      return new Response(JSON.stringify({ invitation_code: body.invitation_code, expires_at: '2027-01-01T00:00:00Z' }), { status: 200 });
+    }
     if (url.pathname === '/functions/v1/account-recovery') {
       return new Response(JSON.stringify({ recovery_code: 'f'.repeat(64), expires_at: '2027-01-01T00:00:00Z' }), { status: 200 });
     }
@@ -54,6 +59,13 @@ test('registration stores its immediate session and login uses password grant wi
     const registered = await client.register('owner@example.com', 'secure-password', 'Warung A');
     assert.deepEqual(registered, registrationSession);
     assert.deepEqual(JSON.parse(storage.get('warungpintar:supabase-session')), registrationSession);
+
+    const invite = await client.inviteAssistant('WARUNG-TEAM-2026-RAHASIA');
+    assert.equal(invite.invitation_code, 'WARUNG-TEAM-2026-RAHASIA');
+    assert.deepEqual(JSON.parse(calls.find((call) => call.path === '/functions/v1/invite-assistant').body), {
+      invitation_code: 'WARUNG-TEAM-2026-RAHASIA',
+    });
+    assert.equal(calls.find((call) => call.path === '/functions/v1/invite-assistant').headers.get('Authorization'), 'Bearer registration-access-token');
     assert.deepEqual(JSON.parse(calls.find((call) => call.path === '/functions/v1/register-owner').body), {
       email: 'owner@example.com',
       password: 'secure-password',
@@ -76,6 +88,7 @@ test('registration stores its immediate session and login uses password grant wi
     assert.equal(calls.find((call) => call.path === '/functions/v1/account-recovery').headers.get('Authorization'), 'Bearer assistant-access-token');
     assert.deepEqual(calls.map((call) => call.path), [
       '/functions/v1/register-owner',
+      '/functions/v1/invite-assistant',
       '/auth/v1/token?grant_type=password',
       '/functions/v1/reset-password',
       '/functions/v1/accept-assistant',
@@ -92,4 +105,14 @@ test('registration stores its immediate session and login uses password grant wi
     if (originalStorage) Object.defineProperty(globalThis, 'localStorage', originalStorage);
     else delete globalThis.localStorage;
   }
+});
+
+
+test('owner signup shows a disabled hidden assistant code field until now is selected', async () => {
+  const app = await readFile(new URL('../js/app.js', import.meta.url), 'utf8');
+  assert.match(app, /<select name="assistantInviteTiming" id="assistant-invite-timing">[\s\S]*?<option value="later" selected>Nanti saja<\/option>[\s\S]*?<option value="now">Isi kode undangan sekarang<\/option>/);
+  assert.match(app, /<div id="assistant-invite-code-field" hidden>/);
+  assert.match(app, /name="assistantInviteCode"[\s\S]*?disabled/);
+  assert.match(app, /t\.id === 'assistant-invite-timing'[\s\S]*?field\.hidden = !enabled[\s\S]*?input\.required = enabled/);
+  assert.match(app, /chosenInviteCode[\s\S]*?invite\.invitation_code[\s\S]*?!== chosenInviteCode/);
 });
