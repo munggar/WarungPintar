@@ -1,6 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  hashAssistantInviteCode,
+  normalizeAssistantInviteCode,
   registerAssistantWithInvite,
   validateAssistantRegistrationPayload,
 } from '../supabase/functions/_shared/assistant-invite-security.js';
@@ -42,6 +44,17 @@ function createClients({ reservation = 'reservation-1', allowed = true, createEr
   return { admin, userClient, calls };
 }
 
+test('owner-defined assistant invite codes are normalized, hashed, and validated consistently', async () => {
+  const code = 'WARUNG-TEAM-2026-RAHASIA';
+  assert.equal(normalizeAssistantInviteCode(code), code.toLowerCase());
+  assert.equal(normalizeAssistantInviteCode(code.toLowerCase()), code.toLowerCase());
+  assert.match(await hashAssistantInviteCode(code), /^[0-9a-f]{64}$/);
+  assert.equal(await hashAssistantInviteCode(code), await hashAssistantInviteCode(code.toLowerCase()));
+  assert.throws(() => normalizeAssistantInviteCode('too-short'));
+  assert.throws(() => normalizeAssistantInviteCode('INVALID CODE WITH SPACES'));
+  assert.throws(() => normalizeAssistantInviteCode('x'.repeat(129)));
+});
+
 test('assistant signup requires a valid code, password, and email without accepting a role field', () => {
   const parsed = validateAssistantRegistrationPayload({ ...validPayload, role: 'owner' });
   assert.equal(parsed.ok, true);
@@ -51,8 +64,19 @@ test('assistant signup requires a valid code, password, and email without accept
     inviteCode: 'a'.repeat(64),
   });
   assert.equal(validateAssistantRegistrationPayload({ ...validPayload, invite_code: 'invalid' }).status, 403);
+  assert.equal(validateAssistantRegistrationPayload({ ...validPayload, invite_code: 'invalid code with spaces' }).status, 403);
   assert.equal(validateAssistantRegistrationPayload({ ...validPayload, password: 'short' }).status, 400);
   assert.equal(validateAssistantRegistrationPayload({ ...validPayload, email: 'invalid' }).status, 400);
+});
+
+test('assistant signup accepts the owner-defined code entered at registration', () => {
+  const parsed = validateAssistantRegistrationPayload({
+    email: 'assistant@example.com',
+    password: 'secure-password',
+    invite_code: 'WARUNG-TEAM-2026-RAHASIA',
+  });
+  assert.equal(parsed.ok, true);
+  assert.equal(parsed.value.inviteCode, 'warung-team-2026-rahasia');
 });
 
 test('assistant code creates only assistant membership and is atomically consumed', async () => {
