@@ -46,6 +46,43 @@ test('Kasir shows a customer-specific server quote before enabling kasbon checko
   assert.ok(edge.includes('shop_remaining: shopRemaining'));
 });
 
+test('Kasbon customer limit auto-refreshes while the payment method is active', async () => {
+  const app = await read('../js/app.js');
+  assert.ok(app.includes('function syncKasbonQuoteAutoRefresh()'));
+  assert.ok(app.includes('setInterval(() => {'));
+  assert.ok(app.includes('}, 5000);'));
+  assert.ok(app.includes('fetchSmartKasbonQuote(S.custId, true, false)'));
+  assert.ok(app.includes("{ silent: !refreshFinance }"));
+  assert.ok(app.includes('S.smartKasbonQuoteRefreshing = hasCurrentQuote'));
+  assert.ok(app.includes('Diperbarui pukul'));
+  assert.ok(app.includes('pembaruan otomatis setiap 5 detik'));
+  assert.ok(app.includes('S.smartKasbonQuoteLoading || S.smartKasbonQuoteRefreshing'));
+  assert.ok(app.includes("document.addEventListener('visibilitychange', refreshKasbonQuoteOnResume)"));
+});
+
+test('background Smart Kasbon quote polling does not trigger the global full-screen loader', async () => {
+  const [app, cloud, supabase] = await Promise.all([
+    read('../js/app.js'), read('../js/cloud-sync.js'), read('../js/supabase.js'),
+  ]);
+  assert.ok(app.includes("{ silent: !refreshFinance }"));
+  assert.ok(cloud.includes('export async function smartKasbon(action, payload = {}, options = {})'));
+  assert.ok(cloud.includes('supabase.smartKasbon({ ...payload, action, store_id: context.storeId }, options)'));
+  assert.ok(supabase.includes('const silent = options.silent === true;'));
+  assert.ok(supabase.includes('delete fetchOptions.silent;'));
+  assert.ok(supabase.includes("!silent && typeof window !== 'undefined'"));
+});
+
+test('Owner recalculates the store financial snapshot after local writes and cloud sync changes', async () => {
+  const app = await read('../js/app.js');
+  assert.ok(app.includes('function syncSmartKasbonFinanceSnapshot()'));
+  assert.ok(app.includes('function scheduleSmartKasbonFinanceSync()'));
+  assert.ok(app.includes('db.setMutationListener(() => {'));
+  assert.ok(app.includes("message === 'Tersinkron ke cloud'"));
+  assert.ok(app.includes('smartKasbonFinanceSnapshotKey'));
+  assert.ok(app.includes('snapshotKey === smartKasbonFinanceSnapshotKey'));
+  assert.ok(app.includes("cloud.smartKasbon('sync_finance', { financial_snapshot: snapshot })"));
+});
+
 test('global process preload is accessible and used by async and Supabase operations', async () => {
   const [app, html, css, supabase] = await Promise.all([
     read('../js/app.js'), read('../index.html'), read('../css/style.css'), read('../js/supabase.js'),

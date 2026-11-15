@@ -38,7 +38,8 @@ function supabaseOperationMessage(path) {
 }
 
 async function request(path, options = {}, retry = true) {
-  const browserWindow = typeof window !== 'undefined' ? window : null;
+  const silent = options.silent === true;
+  const browserWindow = !silent && typeof window !== 'undefined' ? window : null;
   browserWindow?.dispatchEvent(new CustomEvent('wp:supabase-start', {
     detail: { message: supabaseOperationMessage(path) },
   }));
@@ -53,6 +54,7 @@ async function performRequest(path, options = {}, retry = true) {
   const responseType = options.responseType;
   const fetchOptions = { ...options };
   delete fetchOptions.responseType;
+  delete fetchOptions.silent;
   const current = savedSession();
   const headers = new Headers(options.headers || {});
   headers.set('apikey', SUPABASE_PUBLISHABLE_KEY);
@@ -180,10 +182,11 @@ export async function acceptAssistant(email, password, inviteCode) {
   return result;
 }
 
-export async function smartKasbon(payload) {
+export async function smartKasbon(payload, { silent = false } = {}) {
   const { result } = await request('/functions/v1/smart-kasbon', {
     method: 'POST',
     body: JSON.stringify(payload),
+    ...(silent ? { silent: true } : {}),
   });
   return result;
 }
