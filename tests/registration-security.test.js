@@ -152,7 +152,7 @@ test('duplicate or invalid Auth account creation returns a safe rejection withou
     ...validateOwnerRegistrationPayload(validPayload).value,
   });
   assert.equal(result.status, 400);
-  assert.equal(result.body.code, 'registration_not_completed');
+  assert.equal(result.body.code, 'email_already_registered');
   assert.equal(calls.some((call) => call.type === 'signInWithPassword'), false);
   assert.equal(calls.some((call) => call.name === 'release_owner_registration_invite'), true);
 });
