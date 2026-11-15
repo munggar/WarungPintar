@@ -499,8 +499,11 @@ async function submitAuth(form) {
       if (recoveryCodeUnavailable) toast('Akun berhasil dibuat, tetapi Account Recovery Code belum terbit. Buat kode dari Pengaturan sebelum keluar.', 'err');
       if (values.assistantInviteTiming === 'now' && cloud.currentContext()?.role === 'owner') {
         try {
-          const invite = await cloud.inviteAssistant(String(values.assistantInviteCode || '').trim());
-          if (!invite?.invitation_code) throw new Error('Server tidak mengembalikan kode undangan.');
+          const chosenInviteCode = String(values.assistantInviteCode || '').trim().toLowerCase();
+          const invite = await cloud.inviteAssistant(chosenInviteCode);
+          if (!invite?.invitation_code || String(invite.invitation_code).trim().toLowerCase() !== chosenInviteCode) {
+            throw new Error('Layanan undangan belum memakai kode yang Anda masukkan. Perbarui layanan undangan lalu coba lagi, atau buat kode nanti melalui Pengaturan.');
+          }
           await showOneTimeCode({
             title: 'Simpan kode undangan asisten',
             description: 'Bagikan kode ini kepada asisten yang akan bergabung. Kode terikat ke toko ini, berlaku tujuh hari, dan hanya dapat digunakan sekali.',
