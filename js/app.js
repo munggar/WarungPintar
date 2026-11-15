@@ -329,20 +329,6 @@ async function authorizeSmartKasbonLoan(debt, expected) {
       amount: debt.jumlah,
       due_date: L.ymd(debt.jatuhTempo),
     },
-    'copy-one-time-code': async () => {
-      if (!S.oneTimeCode) throw new Error('Kode sekali pakai tidak tersedia.');
-      await navigator.clipboard.writeText(S.oneTimeCode.code);
-      toast('Kode sekali pakai disalin ke papan klip.');
-    },
-    'download-one-time-code': () => {
-      if (!S.oneTimeCode) throw new Error('Kode sekali pakai tidak tersedia.');
-      downloadFile(S.oneTimeCode.filename, 'text/plain;charset=utf-8', `${S.oneTimeCode.title}\n\n${S.oneTimeCode.code}\n\nSimpan secara aman. Kode hanya ditampilkan sekali.\n`);
-    },
-    'confirm-one-time-code': () => {
-      S.oneTimeCodeDone?.();
-      S.oneTimeCode = null;
-      $('#dlg').close();
-    },
   };
   const decision = await smartKasbonMutationWithRetry(
     'issue', payload, 'void_loan', { loan_id: loanId }, expected,
@@ -2180,6 +2166,22 @@ const A = {
   },
   'download-recovery': () => downloadFile('warungpintar-kunci-pemulihan.txt', 'text/plain;charset=utf-8', `Kunci pemulihan WarungPintar\n\n${S.recoveryCode}\n\nSimpan dengan aman. Siapa pun yang memiliki kunci ini dan akses akun dapat membuka data toko.\n`),
   'confirm-recovery': () => { S.recoveryDialogDone?.(); $('#dlg').close(); },
+  'copy-one-time-code': async () => {
+    if (!S.oneTimeCode) throw new Error('Kode sekali pakai tidak tersedia.');
+    await navigator.clipboard.writeText(S.oneTimeCode.code);
+    toast('Kode sekali pakai disalin ke papan klip.');
+  },
+  'download-one-time-code': () => {
+    if (!S.oneTimeCode) throw new Error('Kode sekali pakai tidak tersedia.');
+    downloadFile(S.oneTimeCode.filename, 'text/plain;charset=utf-8', `${S.oneTimeCode.title}\n\n${S.oneTimeCode.code}\n\nSimpan secara aman. Kode hanya ditampilkan sekali.\n`);
+  },
+  'confirm-one-time-code': () => {
+    S.oneTimeCodeDone?.();
+    S.oneTimeCodeDone = null;
+    S.oneTimeCode = null;
+    const dialog = $('#dlg');
+    if (dialog.open) dialog.close();
+  },
   'choose-local': () => S.dataSourceDone?.('local'),
   'choose-cloud': () => S.dataSourceDone?.('cloud'),
 };
