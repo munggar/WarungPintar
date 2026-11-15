@@ -8,6 +8,10 @@ test('ID backend kasbon deterministik dan terpisah antarjenis serta toko', async
   assert.match(loanId, /^[0-9a-f]{8}-[0-9a-f]{4}-5[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i);
   assert.notEqual(loanId, await L.pseudonymousUuid('payment', 'debt-42', 'store-1'));
   assert.notEqual(loanId, await L.pseudonymousUuid('loan', 'debt-42', 'store-2'));
+  for (let index = 0; index < 20; index += 1) {
+    const value = await L.pseudonymousUuid('loan', `debt-${index}`, 'store-1');
+    assert.match(value, /^[0-9a-f]{8}-[0-9a-f]{4}-5[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i);
+  }
 });
 
 test('timestamp Smart Kasbon dinormalisasi dan menolak nilai invalid atau masa depan', () => {
@@ -47,6 +51,20 @@ test('snapshot keuangan memisahkan omzet, laba, dan arus kas 30 hari', () => {
   assert.equal(snapshot.cash_in_30, 21500);
   assert.equal(snapshot.cash_out_30, 3500);
   assert.equal(snapshot.cash_flow_30, 18000);
+});
+
+test('snapshot menandai kasbon tanpa penerimaan kas sebagai cold start', () => {
+  const snapshot = L.smartKasbonFinancialSnapshot({
+    sales: [{
+      waktu: '2025-10-20T10:00:00.000Z',
+      metode: 'kasbon',
+      items: [{ qty: 3, hargaJual: 10000, hargaBeliSaatItu: 6000 }],
+    }],
+  }, new Date('2025-10-20T12:00:00'));
+  assert.equal(snapshot.has_sales_30, false);
+  assert.equal(snapshot.cash_in_30, 0);
+  assert.equal(snapshot.cash_flow_30, 0);
+  assert.equal(snapshot.revenue_30, 30000);
 });
 
 test('snapshot menandai toko tanpa transaksi sebagai cold start', () => {

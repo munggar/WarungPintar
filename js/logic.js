@@ -48,11 +48,11 @@ export async function pseudonymousUuid(kind, id, storeId) {
     'SHA-256',
     new TextEncoder().encode(`warungpintar:smart-kasbon:${storeId}:${kind}:${id}`),
   ));
-  const hex = [...digest].slice(0, 16).map((byte) => byte.toString(16).padStart(2, '0')).join('');
-  const version = ((parseInt(hex[12], 16) & 0x0f) | 0x50).toString(16);
-  const variant = ((parseInt(hex[16], 16) & 0x03) | 0x08).toString(16);
-  const value = hex.slice(0, 12) + version + hex.slice(13, 16) + variant + hex.slice(17);
-  return `${value.slice(0, 8)}-${value.slice(8, 12)}-${value.slice(12, 16)}-${value.slice(16, 20)}-${value.slice(20, 32)}`;
+  const uuidBytes = digest.slice(0, 16);
+  uuidBytes[6] = (uuidBytes[6] & 0x0f) | 0x50;
+  uuidBytes[8] = (uuidBytes[8] & 0x3f) | 0x80;
+  const hex = [...uuidBytes].map((byte) => byte.toString(16).padStart(2, '0')).join('');
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20, 32)}`;
 }
 
 export function validatedSmartKasbonTimestamp(value, now = Date.now()) {
@@ -92,7 +92,7 @@ export function smartKasbonFinancialSnapshot({ sales = [], expenses = [], withdr
 
   return {
     generated_at: new Date(now).toISOString(),
-    has_sales_30: current.transactions > 0,
+    has_sales_30: current.cashIn > 0,
     revenue_7: week.revenue,
     revenue_30: current.revenue,
     revenue_previous_30: previous.revenue,

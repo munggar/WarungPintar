@@ -840,13 +840,13 @@ function renderCart() {
   const total = cartTotal();
   const rows = S.cart.map((c) => {
     const p = S.products.find((x) => x.id === c.id); if (!p) return '';
-    return `<li class="line"><span>${esc(p.nama)}<small>${rp(p.hargaJual)}</small></span><span class="qty"><button class="btn small" data-act="dec" data-id="${esc(c.id)}" aria-label="Kurangi">−</button><b>${c.qty}</b><button class="btn small" data-act="inc" data-id="${esc(c.id)}" aria-label="Tambah">+</button></span><b>${rp(p.hargaJual * c.qty)}</b></li>`;
+    return `<li class="line"><span>${esc(p.nama)}<small>${rp(p.hargaJual)}</small></span><span class="qty"><button class="btn small" data-act="dec" data-id="${esc(c.id)}" aria-label="Kurangi">−</button><input class="qty-input" type="number" data-cart-qty data-id="${esc(c.id)}" min="1" max="${p.stok}" step="1" inputmode="numeric" value="${c.qty}" aria-label="Jumlah ${esc(p.nama)}" required><button class="btn small" data-act="inc" data-id="${esc(c.id)}" aria-label="Tambah">+</button></span><b data-line-total="${esc(c.id)}">${rp(p.hargaJual * c.qty)}</b></li>`;
   }).join('');
   const custOpts = S.customers.map((c) => [c.id, c.nama]);
   box.innerHTML = `
     <h2>Keranjang</h2>
     ${S.cart.length ? `<ul class="plain">${rows}</ul>` : '<p class="muted">Pilih produk untuk memulai transaksi.</p>'}
-    <div class="total"><span>Total</span><b>${rp(total)}</b></div>
+    <div class="total"><span>Total</span><b data-cart-total>${rp(total)}</b></div>
     <div class="seg" role="group" aria-label="Metode pembayaran">${['tunai', 'transfer', 'qris', 'kasbon'].map((m) => `<button class="${S.metode === m ? 'on' : ''}" data-act="metode" data-m="${m}" aria-pressed="${S.metode === m}">${m.toUpperCase() === 'QRIS' ? 'QRIS' : m[0].toUpperCase() + m.slice(1)}</button>`).join('')}</div>
     ${S.metode === 'tunai' ? `<label class="field"><span>Jumlah uang diterima</span><input id="terima" data-currency inputmode="numeric" value="${esc(formatRupiahInput(S.terima))}" placeholder="Opsional"></label>
       <div class="chips">${total ? `<button class="btn small" data-act="cash" data-v="${total}">Uang pas</button>` : ''}${[20000, 50000, 100000].map((v) => `<button class="btn small" data-act="cash" data-v="${v}">${rp(v)}</button>`).join('')}</div><p id="kembali" class="kembali"></p>` : ''}
@@ -888,6 +888,36 @@ function updateKembali() {
   el.textContent = t ? (t >= total ? 'Uang kembalian: ' + rp(t - total) : 'Kekurangan: ' + rp(total - t)) : '';
   el.className = 'kembali' + (t && t < total ? ' neg' : '');
 }
+function updateCartQuantityInput(input, commit = false) {
+  const item = S.cart.find((entry) => entry.id === input.dataset.id);
+  const product = S.products.find((entry) => entry.id === input.dataset.id);
+  if (!item || !product) return;
+  const quantity = input.value === '' ? NaN : Number(input.value);
+  if (!Number.isSafeInteger(quantity) || quantity < 1 || quantity > product.stok) {
+    const message = !Number.isSafeInteger(quantity) || quantity < 1
+      ? 'Masukkan jumlah minimal 1.'
+      : `Stok ${product.nama} yang tersedia hanya ${product.stok}.`;
+    input.setCustomValidity(message);
+    input.setAttribute('aria-invalid', 'true');
+    if (commit) {
+      input.value = String(item.qty);
+      input.setCustomValidity('');
+      input.removeAttribute('aria-invalid');
+      toast(message, 'err');
+    }
+    return;
+  }
+  input.setCustomValidity('');
+  input.removeAttribute('aria-invalid');
+  item.qty = quantity;
+  const line = Array.from(document.querySelectorAll('#cart [data-line-total]'))
+    .find((element) => element.dataset.lineTotal === item.id);
+  if (line) line.textContent = rp(product.hargaJual * quantity);
+  const total = $('#cart [data-cart-total]');
+  if (total) total.textContent = rp(cartTotal());
+  updateKembali();
+}
+
 function addToCart(id) {
   const p = S.products.find((x) => x.id === id); if (!p) return;
   const c = S.cart.find((x) => x.id === id);
@@ -904,6 +934,9 @@ async function checkout() {
     const items = S.cart.map((c) => {
       const p = S.products.find((x) => x.id === c.id);
       if (!p) throw new Error('Produk pada keranjang tidak ditemukan. Muat ulang daftar produk, lalu coba kembali.');
+      if (!Number.isSafeInteger(c.qty) || c.qty < 1 || c.qty > p.stok) {
+        throw new Error(`Jumlah ${p.nama} tidak valid atau melebihi stok tersedia (${p.stok}).`);
+      }
       return { productId: p.id, nama: p.nama, qty: c.qty, hargaJual: p.hargaJual, hargaBeliSaatItu: p.hargaBeli };
     });
     if (S.metode === 'qris' && S.qrisPreview) return toast('Simpan gambar QRIS baru sebelum membuat transaksi.', 'err');
@@ -2103,13 +2136,15 @@ document.addEventListener('submit', (e) => {
 });
 document.addEventListener('input', (e) => {
   const t = e.target;
-  if (t.id === 'q') { S.q = t.value; renderPlist(); }
+  if (t.matches?.('[data-cart-qty]')) updateCartQuantityInput(t);
+  else if (t.id === 'q') { S.q = t.value; renderPlist(); }
   else if (t.id === 'pq') renderProdList(t.value);
   else if (t.id === 'jt') S.jt = t.value;
 });
 document.addEventListener('change', (e) => {
   const t = e.target;
-  if (t.id === 'custsel') S.custId = t.value;
+  if (t.matches?.('[data-cart-qty]')) updateCartQuantityInput(t, true);
+  else if (t.id === 'custsel') S.custId = t.value;
   else if (t.id === 'assistant-invite-timing') {
     const field = $('#assistant-invite-code-field');
     const input = field?.querySelector('input[name="assistantInviteCode"]');
