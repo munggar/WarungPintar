@@ -38,13 +38,14 @@ function supabaseOperationMessage(path) {
 }
 
 async function request(path, options = {}, retry = true) {
-  window.dispatchEvent(new CustomEvent('wp:supabase-start', {
+  const browserWindow = typeof window !== 'undefined' ? window : null;
+  browserWindow?.dispatchEvent(new CustomEvent('wp:supabase-start', {
     detail: { message: supabaseOperationMessage(path) },
   }));
   try {
     return await performRequest(path, options, retry);
   } finally {
-    window.dispatchEvent(new Event('wp:supabase-end'));
+    browserWindow?.dispatchEvent(new Event('wp:supabase-end'));
   }
 }
 

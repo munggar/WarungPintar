@@ -27,6 +27,7 @@ test('global process preload is accessible and used by async and Supabase operat
   assert.ok(css.includes('.process-loader-spinner'));
   assert.ok(supabase.includes('wp:supabase-start'));
   assert.ok(supabase.includes('wp:supabase-end'));
+  assert.ok(supabase.includes("typeof window !== 'undefined'"));
 });
 
 test('ML readiness, training, and activation are handled automatically in the background', async () => {
