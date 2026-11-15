@@ -36,6 +36,8 @@ Beberapa hal yang menjadi fokus pengembangan:
 | Fitur | Deskripsi |
 |---|---|
 | Akun pemilik dan asisten | Owner mendaftar langsung tanpa kode administrator. Setelah toko dibuat, Owner dapat membuat kode undangan Asisten sekarang atau nanti; Asisten mendaftar dengan kode satu kali dari Owner. |
+
+Saat pendaftaran Owner, pilihan “Isi kode undangan sekarang” menampilkan kolom kode khusus Asisten. Pilihan “Nanti saja” menyembunyikan kolom tersebut. Kode harus 16–128 karakter (huruf, angka, tanda hubung, garis bawah), berlaku tujuh hari, dan hanya dapat dipakai sekali.
 | Pengelolaan produk | Mencatat nama, kategori, harga beli dan jual, stok, batas minimum, serta barcode. |
 | Kasir dan pembayaran | Mendukung tunai, transfer, kasbon, serta QRIS statis dengan konfirmasi manual. |
 | Pengelolaan stok | Stok berkurang saat penjualan dan bertambah saat pembelian melalui transaksi atomik. |
