@@ -29,3 +29,11 @@ test('automatic Smart Kasbon policy rejects malformed financial data', () => {
   assert.throws(() => deriveSmartKasbonAutoPolicy({ cash_flow_30: 12.5, net_profit_30: 10 }), /bilangan bulat/);
   assert.throws(() => deriveSmartKasbonAutoPolicy({ cash_flow_30: 12, net_profit_30: Number.MAX_SAFE_INTEGER + 1 }), /bilangan bulat/);
 });
+
+test('SQL RPC persists automatic policy with service-role-only execution', async () => {
+  const { readFile } = await import('node:fs/promises');
+  const sql = await readFile(new URL('../supabase/migrations/20261115140000_auto_smart_kasbon_policy.sql', import.meta.url), 'utf8');
+  assert.match(sql, /create or replace function public\.smart_kasbon_auto_configure/);
+  assert.match(sql, /grant execute on function public\.smart_kasbon_auto_configure[\s\S]*to service_role/);
+  assert.match(sql, /revoke all on function public\.smart_kasbon_auto_configure[\s\S]*from public, anon, authenticated/);
+});

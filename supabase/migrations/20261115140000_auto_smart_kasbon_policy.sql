@@ -63,25 +63,9 @@ begin
       max_total_receivable = v_max_total_receivable,
       financial_snapshot = p_financial_snapshot,
       financial_snapshot_at = v_snapshot_at,
-      policy_version = policy_version + 1,
       updated_by = p_actor,
       updated_at = now()
   where store_id = p_store_id;
-
-  insert into public.smart_kasbon_decisions (store_id, action, approved, decision, actor_id)
-  values (
-    p_store_id, 'policy_auto_updated', true,
-    jsonb_build_object(
-      'source', 'store_ledger_snapshot',
-      'cash_available', v_cash_available,
-      'working_capital', v_working_capital,
-      'reserve_cash', v_reserve_cash,
-      'max_per_customer', v_max_per_customer,
-      'max_active_customers', v_max_active_customers,
-      'max_total_receivable', v_max_total_receivable
-    ),
-    p_actor
-  );
 
   return jsonb_build_object(
     'configured', true,

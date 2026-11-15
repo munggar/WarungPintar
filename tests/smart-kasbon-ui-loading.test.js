@@ -31,3 +31,9 @@ test('ML readiness, training, and activation are handled automatically in the ba
   assert.match(app, /cloud\.smartKasbon\('activate_model', \{ version: training\.version \}\)/);
   assert.match(app, /smartKasbonMutationWithRetry/);
 });
+
+test('manual Smart Kasbon policy writes are rejected by the backend', async () => {
+  const edge = await read('../supabase/functions/smart-kasbon/index.ts');
+  assert.match(edge, /action === 'set_policy'[\\s\\S]*?status: 410/);
+  assert.match(edge, /action === 'sync_finance'[\\s\\S]*?smart_kasbon_auto_configure/);
+});
