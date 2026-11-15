@@ -167,6 +167,43 @@ export function slowMoving(products, sales, now, days = 30) {
 export const inventoryValue = (products) => sum(products.map((p) => Math.max(p.stok, 0) * p.hargaBeli));
 
 // ---------- Kasbon ----------
+const timestampValue = (value) => {
+  if (!value) return null;
+  const timestamp = new Date(value).getTime();
+  return Number.isFinite(timestamp) ? timestamp : null;
+};
+
+export const debtCreatedAt = (debt, sales = []) => {
+  if (timestampValue(debt?.waktu) !== null) return debt.waktu;
+  if (timestampValue(debt?.createdAt) !== null) return debt.createdAt;
+  return sales.find((sale) => sale.id === debt?.saleId)?.waktu || null;
+};
+
+export const debtSettledAt = (debt, payments = []) => {
+  if (timestampValue(debt?.lunasPada) !== null) return debt.lunasPada;
+  const amount = Number(debt?.jumlah);
+  if (!Number.isSafeInteger(amount) || amount <= 0) return null;
+  const orderedPayments = payments
+    .filter((payment) => payment.debtId === debt.id
+      && Number.isSafeInteger(payment.jumlah) && payment.jumlah > 0
+      && timestampValue(payment.waktu) !== null)
+    .sort((a, b) => timestampValue(a.waktu) - timestampValue(b.waktu));
+  let paid = 0;
+  for (const payment of orderedPayments) {
+    paid += payment.jumlah;
+    if (paid >= amount) return payment.waktu;
+  }
+  return null;
+};
+
+export const recentDebts = (debts, sales = []) => [...debts].sort((a, b) => {
+  const aTime = timestampValue(debtCreatedAt(a, sales));
+  const bTime = timestampValue(debtCreatedAt(b, sales));
+  if (aTime === null && bTime !== null) return 1;
+  if (bTime === null && aTime !== null) return -1;
+  return (bTime ?? 0) - (aTime ?? 0) || String(b.id || '').localeCompare(String(a.id || ''));
+});
+
 export const debtPaid = (debt, payments) => sum(payments.filter((p) => p.debtId === debt.id).map((p) => p.jumlah));
 export const debtRemaining = (debt, payments) => Math.max(debt.jumlah - debtPaid(debt, payments), 0);
 export const totalReceivable = (debts, payments) => sum(debts.map((d) => debtRemaining(d, payments)));

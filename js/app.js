@@ -22,6 +22,10 @@ const uid = () => {
 const rp = L.rupiah;
 const fmtDate = (d) => new Date(d).toLocaleDateString('id-ID', { day: 'numeric', month: 'short', year: 'numeric' });
 const fmtTime = (d) => new Date(d).toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' });
+const fmtDateTime = (d) => {
+  if (!d || !Number.isFinite(new Date(d).getTime())) return 'Waktu tidak tersedia';
+  return `${L.formatWib(d)} WIB`;
+};
 const pct = (x) => (x * 100).toFixed(1).replace('.', ',') + '%';
 
 let activeLoadingOperations = 0;
@@ -1148,7 +1152,7 @@ async function checkout() {
       if (!S.custId) return toast('Pilih pelanggan untuk mencatat kasbon.', 'err');
       if (!S.jt) return toast('Tentukan tanggal jatuh tempo.', 'err');
       sale.customerId = S.custId;
-      debt = { id: uid(), customerId: S.custId, saleId: sale.id, jumlah: total, jatuhTempo: L.dateToISO(S.jt), catatan: '' };
+      debt = { id: uid(), customerId: S.custId, saleId: sale.id, jumlah: total, waktu: sale.waktu, jatuhTempo: L.dateToISO(S.jt), catatan: '' };
     }
     const saveLocal = () => db.atomic(['sales', 'products', 'debts'], (st) => {
       st('sales').put(sale);
@@ -1242,7 +1246,7 @@ function renderRecentSales() {
           ? 'Berhasil dibayar'
           : 'Status tidak diketahui';
   box.innerHTML = `<section class="card"><h2>Transaksi terbaru</h2>${sales.length
-    ? `<ul class="rows">${sales.map((sale) => `<li data-sale-id="${esc(sale.id)}"><span>${esc(sale.id)}<small>${fmtDate(sale.waktu)} · ${esc(String(sale.metode || 'tidak diketahui').toUpperCase())} · ${esc(paymentStatus(sale))}</small></span><span class="right"><b>${rp(L.saleTotal(sale))}</b><button class="btn small" data-act="open-receipt" data-id="${esc(sale.id)}">Lihat struk</button></span></li>`).join('')}</ul>${allSales.length > sales.length ? '<button class="btn small" data-act="more-recent-sales">Muat transaksi berikutnya</button>' : ''}`
+    ? `<ul class="rows">${sales.map((sale) => `<li data-sale-id="${esc(sale.id)}"><span>${esc(sale.id)}<small>${esc(fmtDateTime(sale.waktu))} · ${esc(String(sale.metode || 'tidak diketahui').toUpperCase())} · ${esc(paymentStatus(sale))}</small></span><span class="right"><b>${rp(L.saleTotal(sale))}</b><button class="btn small" data-act="open-receipt" data-id="${esc(sale.id)}">Lihat struk</button></span></li>`).join('')}</ul>${allSales.length > sales.length ? '<button class="btn small" data-act="more-recent-sales">Muat transaksi berikutnya</button>' : ''}`
     : '<p class="muted">Belum ada transaksi yang tercatat.</p>'}</section>`;
 }
 async function previewQrisFile(file) {
@@ -1555,11 +1559,18 @@ async function addMoney(kind) {
 function vKasbon() {
   const now = new Date();
   const cust = (id) => S.customers.find((c) => c.id === id) || { nama: 'Pelanggan', wa: '' };
-  const open = S.debts.filter((d) => L.debtRemaining(d, S.payments) > 0).sort((a, b) => a.jatuhTempo.localeCompare(b.jatuhTempo));
-  const closed = S.debts.filter((d) => L.debtRemaining(d, S.payments) <= 0);
+  const orderedDebts = L.recentDebts(S.debts, S.sales);
+  const open = orderedDebts.filter((d) => L.debtRemaining(d, S.payments) > 0);
+  const closed = orderedDebts.filter((d) => L.debtRemaining(d, S.payments) <= 0);
   const row = (d) => {
     const c = cust(d.customerId), sisa = L.debtRemaining(d, S.payments), late = L.isOverdue(d, S.payments, now);
-    return `<li><span>${esc(c.nama)}<small class="${late ? 'neg' : ''}">${late ? 'Jatuh tempo terlewat: ' : 'Jatuh tempo: '}${fmtDate(d.jatuhTempo)}${d.catatan ? ' · ' + esc(d.catatan) : ''}</small></span>
+    const createdAt = L.debtCreatedAt(d, S.sales);
+    const settledAt = sisa <= 0 ? L.debtSettledAt(d, S.payments) : null;
+    return `<li><span>${esc(c.nama)}
+      <small>Transaksi: ${esc(fmtDateTime(createdAt))}</small>
+      <small class="${late ? 'neg' : ''}">${late ? 'Jatuh tempo terlewat: ' : 'Jatuh tempo: '}${fmtDate(d.jatuhTempo)}${d.catatan ? ' · ' + esc(d.catatan) : ''}</small>
+      ${sisa <= 0 ? `<small>Pelunasan: ${esc(fmtDateTime(settledAt))}</small>` : ''}
+      </span>
       <span class="right"><b>${rp(sisa)}</b><small>dari total ${rp(d.jumlah)}</small><span class="acts">${sisa > 0 ? `<button class="btn small" data-act="paydebt" data-id="${esc(d.id)}">Catat pembayaran</button><a class="btn small ghost" target="_blank" rel="noopener" href="${L.waLink(c.wa, L.reminderText(c.nama, sisa, S.cfg.toko, d.jatuhTempo))}">Kirim pengingat</a>` : '<span class="chip ok">Lunas</span>'}</span></span></li>`;
   };
   return `<section class="grid2"><div class="stat"><span>Total piutang</span><b>${rp(L.totalReceivable(S.debts, S.payments))}</b></div><div class="stat"><span>Pelanggan</span><b>${S.customers.length}</b></div></section>
@@ -1654,7 +1665,7 @@ async function manualDebt() {
     ],
   });
   if (!v) return;
-  const debt = { id: uid(), customerId: v.customerId, saleId: null, jumlah: v.jumlah, jatuhTempo: L.dateToISO(v.jt), catatan: v.catatan };
+  const debt = { id: uid(), customerId: v.customerId, saleId: null, jumlah: v.jumlah, waktu: new Date().toISOString(), jatuhTempo: L.dateToISO(v.jt), catatan: v.catatan };
   await saveLocalWithLoanCompensation(debt, () => db.put('debts', debt));
   toast('Kasbon dicatat.'); await refresh(); await fetchSmartKasbon(true);
 }

@@ -113,3 +113,18 @@ test('manual Smart Kasbon policy writes are rejected by the backend', async () =
   assert.ok(edge.includes('status: 410'));
   assert.ok(edge.includes("admin.rpc('smart_kasbon_auto_configure'"));
 });
+
+test('Kasbon and sales histories show transaction time, payoff time, and newest Kasbon first', async () => {
+  const app = await read('../js/app.js');
+  const logic = await read('../js/logic.js');
+  assert.ok(app.includes('L.recentDebts(S.debts, S.sales)'));
+  assert.ok(app.includes('L.debtCreatedAt(d, S.sales)'));
+  assert.ok(app.includes('L.debtSettledAt(d, S.payments)'));
+  assert.ok(app.includes('Transaksi:'));
+  assert.ok(app.includes('Pelunasan:'));
+  assert.ok(app.includes('fmtDateTime(sale.waktu)'));
+  assert.ok(app.includes('waktu: sale.waktu'));
+  assert.match(app, /saleId: null, jumlah: v\.jumlah, waktu: new Date\(\)\.toISOString\(\)/);
+  assert.ok(logic.includes('export const recentDebts'));
+  assert.ok(logic.includes('export const debtSettledAt'));
+});
