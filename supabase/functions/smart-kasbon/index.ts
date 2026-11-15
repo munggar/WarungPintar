@@ -14,6 +14,7 @@ import {
   validateSmartKasbonModelArtifact,
 } from '../_shared/smart-kasbon-model.js';
 import { persistSmartKasbonPrediction } from '../_shared/smart-kasbon-decision.js';
+import { deriveSmartKasbonAutoPolicy } from '../_shared/smart-kasbon-policy.js';
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const MODEL_VERSION_PATTERN = /^sklr-v1-\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
@@ -555,6 +556,17 @@ Deno.serve(async (request) => {
           }
         }
       }
+    } else if (action === 'sync_finance') {
+      const snapshot = financeSnapshot(payload.financial_snapshot);
+      const policy = deriveSmartKasbonAutoPolicy(snapshot);
+      const { data, error } = await admin.rpc('smart_kasbon_auto_configure', {
+        p_store_id: storeId,
+        p_actor: userData.user.id,
+        p_policy: policy,
+        p_financial_snapshot: snapshot,
+      });
+      if (error) throw error;
+      result = data;
     } else if (action === 'activate_model') {
       const version = String(payload.version ?? '');
       if (!MODEL_VERSION_PATTERN.test(version)) throw new ValidationError('Versi model tidak valid.');
