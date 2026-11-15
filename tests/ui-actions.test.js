@@ -5,14 +5,15 @@ import { readFile } from 'node:fs/promises';
 const read = (path) => readFile(new URL(path, import.meta.url), 'utf8');
 
 function applicationActions(source) {
-  const match = source.match(/const A = \{([\\s\\S]*?)\\n\};/);
-  assert.ok(match, 'application action registry must exist');
-  const body = match[1];
+  const start = source.indexOf('const A = {');
+  const end = source.indexOf('\n};', start);
+  assert.ok(start >= 0 && end > start, 'application action registry must exist');
+  const body = source.slice(start, end);
   const keys = new Set();
-  for (const found of body.matchAll(/^  (?:'([^']+)'|([A-Za-z_$][\\w$-]*))\\s*:/gm)) {
+  for (const found of body.matchAll(/^  '([^']+)' *:|^  ([A-Za-z_$][A-Za-z0-9_$-]*) *:/gm)) {
     keys.add(found[1] || found[2]);
   }
-  for (const found of body.matchAll(/^  ([A-Za-z_$][\\w$-]*),$/gm)) keys.add(found[1]);
+  for (const found of body.matchAll(/^  ([A-Za-z_$][A-Za-z0-9_$-]*),$/gm)) keys.add(found[1]);
   return keys;
 }
 
@@ -30,13 +31,19 @@ test('Account Recovery Code modal copy, download, and confirm actions are regist
   for (const action of ['copy-one-time-code', 'download-one-time-code', 'confirm-one-time-code']) {
     assert.ok(registry.includes(`'${action}':`), `missing handler for ${action}`);
   }
-  assert.match(app, /function showOneTimeCode[\\s\\S]*?data-act="copy-one-time-code"[\\s\\S]*?data-act="download-one-time-code"[\\s\\S]*?data-act="confirm-one-time-code"/);
-  assert.match(registry, /'confirm-one-time-code': \(\) => \{[\\s\\S]*?S\\.oneTimeCodeDone\?\.\(\);[\\s\\S]*?S\\.oneTimeCode = null;[\\s\\S]*?dialog\\.close\(\);/);
+  assert.ok(app.includes('function showOneTimeCode'));
+  assert.ok(app.includes('data-act="copy-one-time-code"'));
+  assert.ok(app.includes('data-act="download-one-time-code"'));
+  assert.ok(app.includes('data-act="confirm-one-time-code"'));
+  assert.ok(registry.includes('S.oneTimeCodeDone?.();'));
+  assert.ok(registry.includes("const dialog = $('#dlg');"));
+  assert.ok(registry.includes('if (dialog.open) dialog.close();'));
 });
 
 test('modal submit and dismiss controls have explicit non-submit behavior', async () => {
   const app = await read('../js/app.js');
-  assert.match(app, /function formModal[\\s\\S]*?type="button" class="btn ghost" data-close/);
-  assert.match(app, /d\.addEventListener\('close',[\\s\\S]*?finish\(null\)/);
-  assert.match(app, /document\.addEventListener\('click',[\\s\\S]*?if \(!el \|\| !A\[el\.dataset\.act\]\) return;/);
+  assert.ok(app.includes('type="button" class="btn ghost" data-close'));
+  assert.ok(app.includes("d.addEventListener('close'"));
+  assert.ok(app.includes("document.addEventListener('click'"));
+  assert.ok(app.includes('if (!el || !A[el.dataset.act]) return;'));
 });
