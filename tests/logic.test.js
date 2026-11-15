@@ -235,3 +235,32 @@ test('CSV meloloskan tanda kutip dan menetralkan sel formula', () => {
   assert.equal(L.csvCell('  -SUM(A1:A2)'), '"\'  -SUM(A1:A2)"');
   assert.equal(L.csvCell(-50), '"-50"');
 });
+
+test('kasbon terbaru diurutkan paling atas dan waktu transaksi memakai waktu penjualan jika tersedia', () => {
+  const olderSale = sale('2025-10-18T08:30:00Z', [item('a', 1, 10000, 5000)]);
+  const newerSale = sale('2025-10-20T11:45:00Z', [item('b', 1, 12000, 6000)]);
+  const debts = [
+    { id: 'manual-old', jumlah: 10000, waktu: '2025-10-17T07:00:00Z' },
+    { id: 'sale-old', jumlah: 10000, saleId: olderSale.id },
+    { id: 'sale-new', jumlah: 12000, saleId: newerSale.id },
+    { id: 'unknown', jumlah: 5000 },
+  ];
+  assert.equal(L.debtCreatedAt(debts[1], [olderSale, newerSale]), olderSale.waktu);
+  assert.equal(L.debtCreatedAt(debts[3], [olderSale, newerSale]), null);
+  assert.deepEqual(L.recentDebts(debts, [olderSale, newerSale]).map((debt) => debt.id), [
+    'sale-new', 'sale-old', 'manual-old', 'unknown',
+  ]);
+});
+
+test('waktu pelunasan adalah pembayaran yang secara kronologis membuat kasbon lunas', () => {
+  const debt = { id: 'd-settle', jumlah: 100000 };
+  const payments = [
+    { id: 'p-3', debtId: debt.id, jumlah: 50000, waktu: '2025-10-20T11:00:00.000Z' },
+    { id: 'p-1', debtId: debt.id, jumlah: 25000, waktu: '2025-10-20T09:00:00.000Z' },
+    { id: 'p-other', debtId: 'other', jumlah: 50000, waktu: '2025-10-20T09:30:00.000Z' },
+    { id: 'p-2', debtId: debt.id, jumlah: 25000, waktu: '2025-10-20T10:00:00.000Z' },
+  ];
+  assert.equal(L.debtSettledAt(debt, payments), '2025-10-20T11:00:00.000Z');
+  assert.equal(L.debtSettledAt(debt, payments.slice(1, 3)), null);
+  assert.equal(L.debtSettledAt({ ...debt, lunasPada: '2025-10-20T12:00:00.000Z' }, payments), '2025-10-20T12:00:00.000Z');
+});
