@@ -15,6 +15,22 @@ test('Kasbon screen hides Smart Kasbon setup, dashboard status, and ML controls'
   assert.ok(app.includes('withLoading(() => fetchSmartKasbon()'));
 });
 
+test('Kasir cart quantity can be typed and is validated against current stock', async () => {
+  const app = await read('../js/app.js');
+  assert.ok(app.includes('data-cart-qty'));
+  assert.ok(app.includes('type="number" data-cart-qty'));
+  assert.ok(app.includes('max="${p.stok}"'));
+  assert.ok(app.includes('function updateCartQuantityInput(input, commit = false)'));
+  assert.ok(app.includes('quantity > product.stok'));
+  assert.ok(app.includes('data-cart-total'));
+});
+
+test('Kasbon payment uses the field expected by the backend UUID validator', async () => {
+  const app = await read('../js/app.js');
+  assert.match(app, /const backendPayment = \{\s*id: paymentId,\s*loan_id:/);
+  assert.ok(app.includes("'payment', { payment: backendPayment }"));
+});
+
 test('global process preload is accessible and used by async and Supabase operations', async () => {
   const [app, html, css, supabase] = await Promise.all([
     read('../js/app.js'), read('../index.html'), read('../css/style.css'), read('../js/supabase.js'),

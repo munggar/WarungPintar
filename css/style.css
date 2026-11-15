@@ -183,6 +183,8 @@ ul { margin: 0; padding: 0; list-style: none; }
 .pbtn-stock { color: var(--abu); overflow-wrap: anywhere; line-height: 1.25; }
 .line { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; gap: 10px; align-items: center; padding: 8px 0; border-bottom: 1px dashed var(--garis); }
 .qty { display: flex; align-items: center; gap: 8px; }
+.qty-input { width: 4.2em; min-width: 3.6em; height: 36px; padding: 4px 5px; border: 1px solid var(--garis); border-radius: 6px; background: #fff; color: var(--tinta); font: inherit; font-size: .95rem; font-weight: 700; text-align: center; font-variant-numeric: tabular-nums; }
+.qty-input[aria-invalid="true"] { border-color: var(--merah); }
 .qty b { min-width: 1.5em; text-align: center; }
 .total { display: flex; justify-content: space-between; align-items: baseline; font-size: 1.3rem; margin: 12px 0 4px; font-weight: 700; }
 .seg { display: grid; grid-template-columns: repeat(4, 1fr); border: 2px solid var(--biru); border-radius: var(--r); overflow: hidden; margin: 10px 0; }

@@ -9,8 +9,9 @@ export function deriveSmartKasbonAutoPolicy(snapshot) {
   }
 
   // Gunakan proksi konservatif dari arus kas bersih dan laba bersih 30 hari.
-  const cashAvailable = Math.max(0, snapshot.cash_flow_30);
-  const workingCapital = Math.max(0, snapshot.net_profit_30);
+  const hasVerifiedCashActivity = snapshot.has_sales_30 === true;
+  const cashAvailable = hasVerifiedCashActivity ? Math.max(0, snapshot.cash_flow_30) : 0;
+  const workingCapital = hasVerifiedCashActivity ? Math.max(0, snapshot.net_profit_30) : 0;
   const reserveCash = Math.floor(cashAvailable * 0.5);
   const usableCash = Math.max(0, cashAvailable - reserveCash);
   const capacity = Math.min(usableCash, workingCapital);
