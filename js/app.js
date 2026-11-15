@@ -333,7 +333,7 @@ function renderAuth(message = S.authMessage) {
     <form id="auth-form">
       <label class="field"><span>Email</span><input name="email" type="email" value="${esc(S.authEmail)}" required autocomplete="email"></label>
       ${S.authMode === 'register' ? '<label class="field"><span>Nama toko</span><input name="storeName" required maxlength="120" autocomplete="organization"></label>' : ''}
-      ${assistant ? `<label class="field"><span>Kode undangan asisten</span><input name="inviteCode" required minlength="64" maxlength="64" pattern="[0-9A-Fa-f]{64}" autocomplete="off" spellcheck="false"><small>Masukkan kode yang diberikan pemilik toko. Kode hanya dapat dipakai sekali.</small></label>` : S.authMode === 'register' ? `<label class="field"><span>Undangan Asisten (opsional)</span><select name="assistantInviteTiming"><option value="later" selected>Nanti saja</option><option value="now">Buat kode setelah pendaftaran</option></select><small>Anda bisa membuat kode kapan saja melalui Pengaturan → Undang asisten.</small></label>` : ''}
+      ${assistant ? `<label class="field"><span>Kode undangan asisten</span><input name="inviteCode" required minlength="16" maxlength="128" pattern="[A-Za-z0-9_-]{16,128}" autocomplete="off" spellcheck="false"><small>Masukkan kode yang diberikan pemilik toko. Kode hanya dapat dipakai sekali.</small></label>` : S.authMode === 'register' ? `<label class="field"><span>Undangan Asisten (opsional)</span><select name="assistantInviteTiming" id="assistant-invite-timing"><option value="later" selected>Nanti saja</option><option value="now">Isi kode undangan sekarang</option></select></label><div id="assistant-invite-code-field" hidden><label class="field"><span>Kode undangan untuk Asisten</span><input name="assistantInviteCode" type="text" minlength="16" maxlength="128" pattern="[A-Za-z0-9_-]{16,128}" placeholder="WARUNG-TEAM-2026-RAHASIA" autocomplete="off" spellcheck="false" disabled><small>Masukkan kode yang akan Anda bagikan kepada Asisten. Minimal 16 karakter, hanya huruf, angka, tanda hubung, atau garis bawah. Kode berlaku tujuh hari dan hanya dapat dipakai sekali.</small></label></div>` : ''}
       <label class="field"><span>Kata sandi</span><input name="password" type="password" required minlength="${registering ? '8' : '6'}" autocomplete="${registering ? 'new-password' : 'current-password'}"><small>${registering ? 'Gunakan kata sandi minimal 8 karakter.' : 'Masukkan kata sandi akun Anda.'}</small></label>
       ${registering ? '<label class="field"><span>Ulangi kata sandi</span><input name="confirmPassword" type="password" required minlength="8" autocomplete="new-password"></label>' : ''}
       ${recovery}
@@ -473,6 +473,10 @@ async function submitAuth(form) {
   if (registering && password !== values.confirmPassword) {
     return renderAuth('Kata sandi yang dimasukkan belum sama.');
   }
+  if (S.authMode === 'register' && values.assistantInviteTiming === 'now'
+    && !/^[A-Za-z0-9_-]{16,128}$/.test(String(values.assistantInviteCode || '').trim())) {
+    return renderAuth('Kode undangan Asisten harus 16 sampai 128 karakter dan hanya boleh berisi huruf, angka, tanda hubung, atau garis bawah.');
+  }
   try {
     if (S.authMode === 'register') {
       const result = await supabase.register(
@@ -495,7 +499,7 @@ async function submitAuth(form) {
       if (recoveryCodeUnavailable) toast('Akun berhasil dibuat, tetapi Account Recovery Code belum terbit. Buat kode dari Pengaturan sebelum keluar.', 'err');
       if (values.assistantInviteTiming === 'now' && cloud.currentContext()?.role === 'owner') {
         try {
-          const invite = await cloud.inviteAssistant();
+          const invite = await cloud.inviteAssistant(String(values.assistantInviteCode || '').trim());
           if (!invite?.invitation_code) throw new Error('Server tidak mengembalikan kode undangan.');
           await showOneTimeCode({
             title: 'Simpan kode undangan asisten',
@@ -2270,6 +2274,13 @@ document.addEventListener('input', (e) => {
 document.addEventListener('change', (e) => {
   const t = e.target;
   if (t.id === 'custsel') S.custId = t.value;
+  else if (t.id === 'assistant-invite-timing') {
+    const field = $('#assistant-invite-code-field');
+    const input = field?.querySelector('input[name="assistantInviteCode"]');
+    const enabled = t.value === 'now';
+    if (field) field.hidden = !enabled;
+    if (input) { input.disabled = !enabled; input.required = enabled; }
+  }
   else if (t.id === 'rp') { S.rep.preset = t.value; render(); }
   else if (t.id === 'rf') { S.rep.from = t.value || S.rep.from; render(); }
   else if (t.id === 'rt') { S.rep.to = t.value || S.rep.to; render(); }
