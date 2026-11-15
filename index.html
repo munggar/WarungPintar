@@ -14,12 +14,18 @@
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="default">
   <meta name="apple-mobile-web-app-title" content="Warung Pintar">
-  <link rel="stylesheet" href="css/style.css?v=47">
+  <link rel="stylesheet" href="css/style.css?v=48">
   <title>Warung Pintar</title>
 </head>
 <body>
   <div id="app-splash" class="app-splash" role="presentation" aria-hidden="true">
-    <div class="app-splash-brand">
+    <div id="process-loader" class="process-loader" role="status" aria-live="polite" aria-atomic="true" hidden>
+    <div class="process-loader-card">
+      <span class="process-loader-spinner" aria-hidden="true"></span>
+      <p id="process-loader-message">Memproses permintaan...</p>
+    </div>
+  </div>
+  <div class="app-splash-brand">
       <img src="icons/logo-reference.png?v=46" alt="Warung Pintar - Belanja Mudah, Warung Makin Maju" width="1087" height="768">
     </div>
   </div>
@@ -32,6 +38,6 @@
   <dialog id="dlg"></dialog>
   <div id="toast" class="toast" role="status"></div>
   <noscript><p>WarungPintar membutuhkan JavaScript.</p></noscript>
-  <script type="module" src="js/app.js?v=47"></script>
+  <script type="module" src="js/app.js?v=48"></script>
 </body>
 </html>

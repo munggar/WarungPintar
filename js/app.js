@@ -24,16 +24,41 @@ const fmtDate = (d) => new Date(d).toLocaleDateString('id-ID', { day: 'numeric',
 const fmtTime = (d) => new Date(d).toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' });
 const pct = (x) => (x * 100).toFixed(1).replace('.', ',') + '%';
 
-function withLoading(task, _message = 'Memproses permintaan...', { showLoader = true } = {}) {
-  return Promise.resolve().then(task);
+let activeLoadingOperations = 0;
+function beginLoading(message = 'Memproses permintaan...') {
+  activeLoadingOperations += 1;
+  const overlay = $('#process-loader');
+  const label = $('#process-loader-message');
+  if (label) label.textContent = message;
+  if (overlay) overlay.hidden = false;
+  document.body.setAttribute('aria-busy', 'true');
 }
+function endLoading() {
+  activeLoadingOperations = Math.max(0, activeLoadingOperations - 1);
+  if (activeLoadingOperations === 0) {
+    const overlay = $('#process-loader');
+    if (overlay) overlay.hidden = true;
+    document.body.removeAttribute('aria-busy');
+  }
+}
+function withLoading(task, message = 'Memproses permintaan...') {
+  beginLoading(message);
+  return Promise.resolve().then(task).finally(endLoading);
+}
+
+// Pantau juga seluruh request Supabase agar operasi yang tidak berasal dari tombol
+// tetap menampilkan preloader global.
+window.addEventListener('wp:supabase-start', (event) => {
+  beginLoading(event.detail?.message || 'Menghubungkan ke server...');
+});
+window.addEventListener('wp:supabase-end', endLoading);
 
 const S = {
   products: [], sales: [], purchases: [], expenses: [], customers: [], debts: [], payments: [], withdrawals: [],
   cfg: {}, role: 'owner', account: null, authMode: 'login', authFlow: null, authMessage: '', authEmail: '',
   cart: [], q: '', metode: 'tunai', terima: '', custId: '', jt: '', checkoutInProgress: false,
   processingDebtIds: new Set(),
-  smartKasbon: null, smartKasbonCustomerNames: {}, smartKasbonLoading: false, smartKasbonMutationInProgress: false, smartKasbonError: '',
+  smartKasbon: null, smartKasbonLoading: false, smartKasbonMutationInProgress: false, smartKasbonError: '',
   qrisPreview: '', qrisFile: null, qrisStorageError: '',
   receipt: null, oneTimeCode: null,
   recentSalesLimit: 20,
@@ -177,14 +202,34 @@ async function fetchSmartKasbon(force = false) {
       if (!expected || !navigator.onLine) throw new Error('Dashboard Smart Kasbon memerlukan koneksi internet.');
       await prepareSmartKasbonBackend(expected);
       assertSmartKasbonContext(expected);
-      const dashboard = await cloud.smartKasbon('dashboard');
+      let dashboard = await cloud.smartKasbon('dashboard');
       assertSmartKasbonContext(expected);
+
+      // ML berjalan sepenuhnya di backend setelah dataset toko matang.
+      // Rule-Based tetap menjadi penentu limit dan persetujuan kasbon.
+      if (expected.role === 'owner') {
+        const model = dashboard.model || {};
+        let modelChanged = false;
+        if (model.state === 'shadow'
+          && model.metrics?.activation_eligible === true
+          && model.active_version !== model.version
+          && model.status !== 'ML_ACTIVE') {
+          await cloud.smartKasbon('activate_model', { version: model.version });
+          modelChanged = true;
+        } else if (model.readiness?.eligible === true && model.status === 'ML_READY_TO_TRAIN') {
+          const training = await cloud.smartKasbon('evaluate_model');
+          if (training.state === 'ML_SHADOW' && training.activation_eligible === true && training.version) {
+            await cloud.smartKasbon('activate_model', { version: training.version });
+          }
+          modelChanged = true;
+        }
+        if (modelChanged) {
+          assertSmartKasbonContext(expected);
+          dashboard = await cloud.smartKasbon('dashboard');
+          assertSmartKasbonContext(expected);
+        }
+      }
       S.smartKasbon = dashboard;
-      const customerNames = await Promise.all(S.customers.map(async (customer) => [
-        await L.pseudonymousUuid('customer', customer.id, storeId), customer.nama,
-      ]));
-      assertSmartKasbonContext(expected);
-      S.smartKasbonCustomerNames = Object.fromEntries(customerNames);
     } catch (error) {
       const current = cloud.currentContext();
       if (current?.userId === expected?.userId && current.storeId === storeId) {
@@ -208,7 +253,10 @@ async function fetchSmartKasbon(force = false) {
 }
 
 function mKasbon() {
-  if (!S.smartKasbonLoading && Date.now() - smartKasbonLastLoad >= 60000) void fetchSmartKasbon();
+  if (!S.smartKasbonLoading && Date.now() - smartKasbonLastLoad >= 60000) {
+    void withLoading(() => fetchSmartKasbon(), 'Menghitung batas kasbon toko...')
+      .catch((error) => { console.error('Smart Kasbon background processing failed', error); });
+  }
 }
 
 async function authorizeSmartKasbonLoan(debt, expected) {
@@ -1244,12 +1292,14 @@ async function addPurchase() {
       submit.disabled = true;
       error.textContent = '';
       try {
-        await db.recordPurchase(purchase, newProduct);
-        finish(true);
-        toast(isNew
-          ? `${target.nama} ditambahkan dengan stok awal ${qty} ${target.satuan}.`
-          : `Stok ${target.nama} bertambah sebanyak ${qty}.`);
-        await refresh();
+        await withLoading(async () => {
+          await db.recordPurchase(purchase, newProduct);
+          finish(true);
+          toast(isNew
+            ? `${target.nama} ditambahkan dengan stok awal ${qty} ${target.satuan}.`
+            : `Stok ${target.nama} bertambah sebanyak ${qty}.`);
+          await refresh();
+        }, 'Menyimpan belanja dan memperbarui data toko...');
       } catch (saveError) {
         console.error('Belanja barang gagal disimpan.', saveError);
         fail(saveError.message || 'Belanja barang gagal disimpan.');
@@ -1306,141 +1356,12 @@ function vKasbon() {
       <span class="right"><b>${rp(sisa)}</b><small>dari total ${rp(d.jumlah)}</small><span class="acts">${sisa > 0 ? `<button class="btn small" data-act="paydebt" data-id="${esc(d.id)}">Catat pembayaran</button><a class="btn small ghost" target="_blank" rel="noopener" href="${L.waLink(c.wa, L.reminderText(c.nama, sisa, S.cfg.toko, d.jatuhTempo))}">Kirim pengingat</a>` : '<span class="chip ok">Lunas</span>'}</span></span></li>`;
   };
   return `<section class="grid2"><div class="stat"><span>Total piutang</span><b>${rp(L.totalReceivable(S.debts, S.payments))}</b></div><div class="stat"><span>Pelanggan</span><b>${S.customers.length}</b></div></section>
-  ${smartKasbonPanel()}
   <div class="row"><button class="btn primary" data-act="newcust2">Tambah pelanggan</button>${OWNER() ? '<button class="btn" data-act="manualdebt">Catat kasbon manual</button>' : ''}</div>
   <h2>Belum lunas</h2><ul class="rows tall">${open.length ? open.map(row).join('') : '<li class="muted">Tidak ada kasbon yang belum lunas.</li>'}</ul>
   <button class="btn ghost small" data-act="togglelunas">${S.showLunas ? 'Sembunyikan' : 'Tampilkan'} kasbon lunas (${closed.length})</button>
   ${S.showLunas ? `<ul class="rows tall">${closed.map(row).join('')}</ul>` : ''}`;
 }
 
-function smartKasbonPanel() {
-  const dashboard = S.smartKasbon;
-  const setupButton = OWNER()
-    ? `<button class="btn primary small" data-act="smart-kasbon-setup">${dashboard?.policy?.configured ? 'Ubah kebijakan' : 'Atur Smart Kasbon'}</button>`
-    : '';
-  if (S.smartKasbonLoading) return '<section class="card"><h2>Smart Kasbon</h2><p class="muted">Memuat analisis dan batas kasbon dari server…</p></section>';
-  if (S.smartKasbonError) return `<section class="card"><h2>Smart Kasbon</h2><p class="err">${esc(S.smartKasbonError)}</p><button class="btn small" data-act="smart-kasbon-refresh">Coba lagi</button></section>`;
-  if (!dashboard) return '<section class="card"><h2>Smart Kasbon</h2><p class="muted">Dashboard belum dimuat.</p><button class="btn small" data-act="smart-kasbon-refresh">Muat dashboard</button></section>';
-  const policy = dashboard.policy;
-  if (!policy?.configured) {
-    return `<section class="card"><h2>Smart Kasbon</h2><p>${OWNER()
-      ? 'Masukkan kas dan modal kerja sebagai input kebijakan. Server menghitung batas dari input ini, tetapi tidak memverifikasi snapshot vault secara independen.'
-      : 'Pemilik toko perlu mengatur kondisi keuangan dan kebijakan kasbon terlebih dahulu.'}</p>
-      <p class="muted small">Kasbon baru memerlukan koneksi internet. Kas dan modal kerja tidak dilacak otomatis oleh aplikasi.</p>${setupButton}</section>`;
-  }
-  const summary = dashboard.summary || {};
-  const risks = dashboard.risks || [];
-  const health = dashboard.health || risks[0] || {};
-  const healthNames = {
-    cold_start: 'Data belum cukup (cold start)', kritis: 'Kritis', menurun: 'Menurun',
-    stagnan: 'Stagnan', sangat_sehat: 'Sangat sehat', sehat: 'Sehat', stabil: 'Stabil',
-  };
-  const riskCounts = risks.reduce((counts, item) => {
-    const name = item.risk || 'sedang';
-    counts[name] = (counts[name] || 0) + 1;
-    return counts;
-  }, {});
-  const riskText = ['tinggi', 'sedang', 'rendah']
-    .filter((name) => riskCounts[name])
-    .map((name) => `${riskCounts[name]} ${name}`)
-    .join(' · ') || 'Belum ada riwayat pelanggan untuk dinilai';
-  const riskRows = risks.slice(0, 10).map((item) => {
-    const name = S.smartKasbonCustomerNames[item.customer_id] || 'Pelanggan pseudonim';
-    const remaining = item.current_customer_balance || 0;
-    return `<li><span>${esc(name)}<small>Risiko ${esc(item.risk || 'sedang')} · saldo ${rp(remaining)} · limit ${rp(item.limits?.per_customer || 0)}</small></span><b>Skor ${item.risk_score ?? 60}/100</b></li>`;
-  }).join('');
-  const decisions = (dashboard.decisions || []).slice(0, 5);
-  const model = dashboard.model || {};
-  const activeModel = model.active_model;
-  const currentCandidate = activeModel || model;
-  const evaluation = currentCandidate.metrics?.evaluation;
-  const hasEvaluation = evaluation && Number.isSafeInteger(evaluation.sample_count)
-    && ['accuracy', 'precision', 'recall', 'f1', 'brier_score', 'expected_calibration_error', 'pr_auc']
-      .every((key) => Number.isFinite(evaluation[key]));
-  const candidateEvaluation = model.state === 'shadow' ? model.metrics?.evaluation : null;
-  const hasCandidateEvaluation = candidateEvaluation && Number.isSafeInteger(candidateEvaluation.sample_count)
-    && ['accuracy', 'precision', 'recall', 'f1', 'pr_auc', 'brier_score', 'expected_calibration_error']
-      .every((key) => Number.isFinite(candidateEvaluation[key]));
-  const status = S.smartKasbonMutationInProgress && model.status === 'ML_READY_TO_TRAIN'
-    ? 'ML_TRAINING' : model.status;
-  const statusLabel = status === 'ML_ACTIVE' ? 'Machine Learning Active'
-    : status === 'ML_READY_TO_TRAIN' ? 'ML Ready to Train'
-      : status === 'ML_TRAINING' ? 'ML Training'
-        : status === 'ML_SHADOW' ? 'ML Shadow'
-          : status === 'RULE_BASED_FALLBACK' ? 'Rule-Based Fallback'
-            : 'Rule-Based';
-  const statusExplanation = status === 'ML_ACTIVE'
-    ? 'Prediksi berikutnya memakai artifact ML aktif. Keputusan batas dan persetujuan tetap ditentukan aturan server.'
-    : status === 'ML_READY_TO_TRAIN'
-      ? 'Dataset memenuhi ambang training, tetapi model belum dilatih dan diaktifkan. Sistem masih menggunakan Rule-Based.'
-      : status === 'ML_SHADOW'
-        ? 'Kandidat belum aktif. Prediksi tetap menggunakan Rule-Based sampai kandidat lolos evaluasi dan diaktifkan pemilik.'
-        : status === 'RULE_BASED_FALLBACK'
-          ? 'Machine Learning gagal atau artifact tidak valid; sistem kembali ke aturan bisnis sementara.'
-          : 'Machine Learning belum aktif karena data historis belum mencukupi. Sistem menggunakan aturan bisnis sementara.';
-  const trainButton = OWNER() && model.readiness?.eligible && !S.smartKasbonMutationInProgress
-    ? '<button class="btn small" data-act="smart-kasbon-model-evaluate">Latih dan evaluasi dari data toko</button>'
-    : '';
-  const activateButton = OWNER() && model.state === 'shadow'
-    && model.metrics?.activation_eligible === true && model.active_version !== model.version
-    ? `<button class="btn small" data-act="smart-kasbon-model-activate" data-version="${esc(model.version)}">Aktifkan advisory</button>`
-    : '';
-  const readiness = model.readiness || {};
-  const readinessCounts = readiness.counts || {};
-  const exclusionText = Object.entries(model.exclusions || {})
-    .filter(([, count]) => Number.isSafeInteger(count) && count > 0)
-    .map(([reason, count]) => `${esc(reason)}: ${count}`)
-    .join(' · ');
-  const metricsDetails = hasEvaluation ? `<details><summary>Evaluasi holdout aktual (${evaluation.sample_count} data)</summary>
-    <p class="small">Accuracy ${pct(evaluation.accuracy)} · Precision ${pct(evaluation.precision)} · Recall ${pct(evaluation.recall)} · F1 ${pct(evaluation.f1)}</p>
-    <p class="small">ROC-AUC ${Number.isFinite(evaluation.roc_auc) ? pct(evaluation.roc_auc) : 'tidak tersedia'} · PR-AUC ${pct(evaluation.pr_auc)} · Brier ${evaluation.brier_score.toFixed(3)} · ECE ${evaluation.expected_calibration_error.toFixed(3)}</p>
-    <p class="small">Confusion matrix: TP ${evaluation.confusion_matrix?.true_positive ?? '—'}, FP ${evaluation.confusion_matrix?.false_positive ?? '—'}, TN ${evaluation.confusion_matrix?.true_negative ?? '—'}, FN ${evaluation.confusion_matrix?.false_negative ?? '—'}.</p>
-    ${Number.isFinite(currentCandidate.metrics?.baseline?.pr_auc) ? `<p class="small">Baseline Rule-Based PR-AUC ${pct(currentCandidate.metrics.baseline.pr_auc)}, Brier ${Number.isFinite(currentCandidate.metrics.baseline.brier_score) ? currentCandidate.metrics.baseline.brier_score.toFixed(3) : '—'}.</p>` : ''}
-    </details>` : '';
-  const modelDetails = status === 'ML_ACTIVE' && activeModel
-    ? `<p class="small">Model ${esc(activeModel.version)} · dilatih ${fmtDate(activeModel.trained_at)} · ${activeModel.training_count} data training · ${activeModel.evaluation_count} data evaluasi.</p>
-      <p class="muted small">Model logistik per toko; hasil historis holdout tidak menjamin hasil mendatang dan dapat bias jika data transaksi/snapshot tidak lengkap atau berbeda.</p>${metricsDetails}`
-    : model.state === 'shadow'
-      ? `<p class="small">Kandidat ${esc(model.version)} · ${model.training_count} data training · ${model.evaluation_count} data evaluasi · ${model.metrics?.activation_eligible ? 'memenuhi guard evaluasi, menunggu aktivasi owner' : 'belum memenuhi guard evaluasi'}.</p>${metricsDetails}`
-      : '';
-  const candidateDetails = status === 'ML_ACTIVE' && model.state === 'shadow'
-    ? `<details><summary>Evaluasi kandidat ${esc(model.version)}</summary>
-      <p class="small">${model.training_count} data training · ${model.evaluation_count} data evaluasi · ${model.metrics?.activation_eligible ? 'memenuhi guard evaluasi' : 'belum memenuhi guard evaluasi'}.</p>
-      ${hasCandidateEvaluation
-        ? `<p class="small">Holdout: accuracy ${pct(candidateEvaluation.accuracy)} · precision ${pct(candidateEvaluation.precision)} · recall ${pct(candidateEvaluation.recall)} · F1 ${pct(candidateEvaluation.f1)} · PR-AUC ${pct(candidateEvaluation.pr_auc)} · Brier ${candidateEvaluation.brier_score.toFixed(3)} · ECE ${candidateEvaluation.expected_calibration_error.toFixed(3)}.</p>` : ''}
-      </details>`
-    : '';
-  return `<section class="card">
-    <div class="row wrap"><h2>Smart Kasbon</h2>${setupButton}<button class="btn ghost small" data-act="smart-kasbon-refresh">Perbarui</button></div>
-    <p>Kondisi toko: <b>${esc(healthNames[health.health] || 'Belum dinilai')}</b></p>
-    <div class="grid2">
-      <div class="stat"><span>Piutang aktif server</span><b>${rp(summary.total_receivable || 0)}</b></div>
-      <div class="stat"><span>Piutang terlambat</span><b class="${summary.overdue_receivable ? 'neg' : ''}">${rp(summary.overdue_receivable || 0)}</b></div>
-    </div>
-    <p class="small">Pelanggan aktif: ${summary.active_customers || 0} / ${policy.max_active_customers}. Kasbon aktif: ${summary.loan_count || 0}.</p>
-    <p class="small">Batas piutang efektif saat ini: ${rp(health.limits?.total_receivable || 0)} · batas per pelanggan paling tinggi ${rp(policy.max_per_customer)}.</p>
-    <p class="small">Ringkasan keuangan dari vault browser: ${health.metrics?.snapshot_fresh ? 'terbaru' : 'perlu diperbarui pemilik'}.</p>
-    <p class="muted small">Batas ini adalah aturan internal, bukan jaminan kesehatan usaha. Snapshot dan kas/modal kerja berasal dari browser/pemilik dan tidak dapat diverifikasi server terhadap vault terenkripsi.</p>
-    <p class="small">Risiko riwayat pelanggan: ${esc(riskText)}.</p>
-    ${riskRows ? `<details><summary>Skor risiko pelanggan (${risks.length})</summary><ul class="rows">${riskRows}</ul>${risks.length > 10 ? `<p class="muted small">Menampilkan 10 dari ${risks.length} pelanggan.</p>` : ''}</details>` : ''}
-    <p><span class="chip ${status === 'ML_ACTIVE' ? 'ok' : 'warn'}">${esc(statusLabel)}</span></p>
-    <p class="small">Metode prediksi: ${status === 'ML_ACTIVE' ? 'Machine Learning' : 'Rule-Based'}</p>
-    <p class="muted small">${esc(statusExplanation)}</p>
-    ${status !== 'ML_ACTIVE' ? `<p class="muted small">Status kesiapan dataset: ${esc(status)}. ${esc(readiness.reason || 'Kelayakan belum tersedia.')}</p>` : ''}
-    ${OWNER() ? `<details><summary>Kesiapan dataset dan status training</summary>
-      <p class="small">Observasi matang ${readinessCounts.mature_observations ?? 0} · on-time ${readinessCounts.on_time ?? 0} · late ${readinessCounts.late ?? 0}.</p>
-      <p class="small">Split yang memenuhi minimum: training ${readinessCounts.training_observations ?? 0} · evaluasi ${readinessCounts.evaluation_observations ?? 0} · pelanggan evaluasi independen ${readinessCounts.evaluation_customers ?? 0}.</p>
-      <p class="small">Ambang: training ${model.minimums?.trainingRows ?? '—'}, evaluasi ${model.minimums?.evaluationRows ?? '—'}, per kelas training ${model.minimums?.trainingPerClass ?? '—'}, per kelas evaluasi ${model.minimums?.evaluationPerClass ?? '—'}, pelanggan evaluasi ${model.minimums?.evaluationCustomers ?? '—'}.</p>
-      ${exclusionText ? `<p class="muted small">Data dikecualikan: ${exclusionText}.</p>` : ''}
-      ${model.source_limit_exceeded ? '<p class="err small">Dataset melebihi batas maksimum pemrosesan; training ditahan.</p>' : ''}
-      ${model.training_status?.last_error_code ? `<p class="err small">Kode kegagalan terakhir: ${esc(model.training_status.last_error_code)}.</p>` : ''}
-      </details>` : ''}
-    ${modelDetails}
-    ${candidateDetails}
-    <div class="row wrap">${trainButton}${activateButton}</div>
-    ${decisions.length ? `<details><summary>Keputusan terbaru (${decisions.length})</summary><ul class="plain small">${decisions.map((item) => `<li>${esc(item.action)} · ${item.approved === null ? 'dicatat' : item.approved ? 'disetujui' : 'ditolak'} · ${fmtDate(item.created_at)}</li>`).join('')}</ul></details>` : ''}
-  </section>`;
-}
 async function newCustomer() {
   const v = await formModal({
     title: 'Tambah pelanggan',
@@ -1529,91 +1450,6 @@ async function manualDebt() {
   const debt = { id: uid(), customerId: v.customerId, saleId: null, jumlah: v.jumlah, jatuhTempo: L.dateToISO(v.jt), catatan: v.catatan };
   await saveLocalWithLoanCompensation(debt, () => db.put('debts', debt));
   toast('Kasbon dicatat.'); await refresh(); await fetchSmartKasbon(true);
-}
-
-async function setupSmartKasbon() {
-  if (!OWNER()) return toast('Hanya pemilik yang dapat mengatur kebijakan Smart Kasbon.', 'err');
-  const policy = S.smartKasbon?.policy;
-  const v = await formModal({
-    title: policy?.configured ? 'Ubah kebijakan Smart Kasbon' : 'Atur Smart Kasbon',
-    note: 'Kas dan modal kerja tidak dilacak otomatis. Masukkan kondisi aktual toko. Batas kasbon akan dihitung di server dari angka ini dan ringkasan transaksi.',
-    fields: [
-      { name: 'cashAvailable', label: 'Kas tersedia saat ini (Rp)', type: 'currency', min: 0, required: true, value: policy?.cash_available ?? '' },
-      { name: 'workingCapital', label: 'Modal kerja sebelum kewajiban dan piutang (Rp)', type: 'currency', min: 0, required: true, value: policy?.working_capital ?? '' },
-      { name: 'liabilities', label: 'Kewajiban usaha (Rp)', type: 'currency', min: 0, required: true, value: policy?.liabilities ?? 0 },
-      { name: 'reserveCash', label: 'Cadangan kas minimum (Rp)', type: 'currency', min: 0, required: true, value: policy?.reserve_cash ?? 0 },
-      { name: 'maxPerCustomer', label: 'Batas nominal per pelanggan (Rp)', type: 'currency', min: 1, required: true, value: policy?.max_per_customer ?? 100000 },
-      { name: 'maxActiveCustomers', label: 'Maksimum pelanggan kasbon aktif', type: 'number', min: 1, required: true, value: policy?.max_active_customers ?? 2 },
-      { name: 'maxTotalReceivable', label: 'Batas total piutang kasbon (Rp)', type: 'currency', min: 1, required: true, value: policy?.max_total_receivable ?? 200000 },
-    ],
-    validate: (values) => values.reserveCash > values.cashAvailable
-      ? 'Cadangan kas tidak boleh melebihi kas tersedia.'
-      : '',
-  });
-  if (!v) return;
-  const confirmed = await confirmModal(
-    'Simpan kebijakan Smart Kasbon?',
-    'Simpan kebijakan',
-    'Pastikan angka kas, modal kerja, kewajiban, dan cadangan sudah dikonfirmasi pemilik. Aplikasi tidak dapat memverifikasi saldo kas aktual.',
-  );
-  if (!confirmed) return;
-  const financialSnapshot = L.smartKasbonFinancialSnapshot(S);
-  if (S.smartKasbonMutationInProgress || S.processingDebtIds.size || S.checkoutInProgress) {
-    throw new Error('Transaksi Smart Kasbon lain sedang diproses.');
-  }
-  S.smartKasbonMutationInProgress = true;
-  try {
-    await cloud.smartKasbon('set_policy', {
-      policy: v,
-      financial_snapshot: financialSnapshot,
-    });
-    toast('Kebijakan Smart Kasbon disimpan.');
-    await fetchSmartKasbon(true);
-  } finally {
-    S.smartKasbonMutationInProgress = false;
-  }
-}
-
-async function evaluateSmartKasbonModel() {
-  if (!OWNER()) return toast('Hanya pemilik yang dapat melatih model Smart Kasbon.', 'err');
-  if (S.smartKasbonMutationInProgress || S.processingDebtIds.size || S.checkoutInProgress) {
-    return toast('Selesaikan transaksi kasbon yang sedang berjalan terlebih dahulu.', 'err');
-  }
-  S.smartKasbonMutationInProgress = true;
-  try {
-    const result = await cloud.smartKasbon('evaluate_model');
-    await fetchSmartKasbon(true);
-    if (result.state === 'shadow') {
-      toast(result.activation_eligible
-        ? 'Evaluasi holdout selesai. Kandidat disimpan sebagai shadow; model belum aktif.'
-        : 'Evaluasi selesai, tetapi kandidat belum memenuhi syarat aktivasi.');
-    } else {
-      toast(result.reason || 'Model belum dapat dilatih dari data toko.', 'err');
-    }
-  } finally {
-    S.smartKasbonMutationInProgress = false;
-  }
-}
-
-async function activateSmartKasbonModel(version) {
-  if (!OWNER()) return toast('Hanya pemilik yang dapat mengaktifkan model Smart Kasbon.', 'err');
-  if (S.smartKasbonMutationInProgress || S.processingDebtIds.size || S.checkoutInProgress) {
-    return toast('Selesaikan transaksi kasbon yang sedang berjalan terlebih dahulu.', 'err');
-  }
-  const confirmed = await confirmModal(
-    'Aktifkan model advisory Smart Kasbon?',
-    'Aktifkan model',
-    'Model hanya menampilkan indikasi risiko. Batas dan persetujuan kasbon tetap ditentukan oleh aturan yang ada.',
-  );
-  if (!confirmed) return;
-  S.smartKasbonMutationInProgress = true;
-  try {
-    const result = await cloud.smartKasbon('activate_model', { version });
-    await fetchSmartKasbon(true);
-    toast(`Model advisory ${result.version} diaktifkan.`);
-  } finally {
-    S.smartKasbonMutationInProgress = false;
-  }
 }
 
 /* ============ Laporan ============ */
@@ -2070,10 +1906,7 @@ const A = {
   delmoney: async (d) => { if (await confirmModal('Hapus catatan ini?', 'Hapus')) { await db.del(d.kind, d.id); await refresh(); } },
   paydebt: (d) => payDebt(d.id),
   manualdebt: manualDebt,
-  'smart-kasbon-setup': setupSmartKasbon,
   'smart-kasbon-refresh': () => fetchSmartKasbon(true),
-  'smart-kasbon-model-evaluate': evaluateSmartKasbonModel,
-  'smart-kasbon-model-activate': (d) => activateSmartKasbonModel(d.version),
   'save-zakat': saveZakatCalculation,
   togglelunas: () => { S.showLunas = !S.showLunas; render(); },
   csv: exportCSV,
@@ -2243,7 +2076,7 @@ document.addEventListener('click', (e) => {
   const message = el.dataset.act === 'offline-unlock' ? 'Sedang membuka data offline...'
     : el.dataset.act === 'logout' ? 'Sedang keluar...'
       : 'Sedang memproses...';
-  withLoading(() => A[el.dataset.act](el.dataset, el), message, { showLoader: el.dataset.act !== 'confirm-qris' })
+  withLoading(() => A[el.dataset.act](el.dataset, el), message)
     .catch((err) => { console.error(err); toast('Terjadi kesalahan: ' + err.message, 'err'); })
     .finally(() => { if (el.isConnected) el.disabled = false; });
 });

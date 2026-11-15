@@ -1,0 +1,45 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
+
+const read = (path) => readFile(new URL(path, import.meta.url), 'utf8');
+
+test('Kasbon screen hides Smart Kasbon setup, dashboard status, and ML controls', async () => {
+  const app = await read('../js/app.js');
+  for (const hiddenControl of [
+    'smartKasbonPanel', 'smart-kasbon-setup', 'smart-kasbon-model-evaluate',
+    'smart-kasbon-model-activate', 'Atur Smart Kasbon',
+    'Latih dan evaluasi dari data toko', 'Aktifkan advisory',
+  ]) assert.equal(app.includes(hiddenControl), false, hiddenControl);
+  assert.ok(app.includes('function mKasbon()'));
+  assert.ok(app.includes('withLoading(() => fetchSmartKasbon()'));
+});
+
+test('global process preload is accessible and used by async and Supabase operations', async () => {
+  const [app, html, css, supabase] = await Promise.all([
+    read('../js/app.js'), read('../index.html'), read('../css/style.css'), read('../js/supabase.js'),
+  ]);
+  assert.ok(app.includes('function beginLoading'));
+  assert.ok(app.includes('function withLoading(task, message'));
+  assert.ok(app.includes('overlay.hidden = false'));
+  assert.ok(html.includes('id="process-loader"'));
+  assert.ok(html.includes('id="process-loader-message"'));
+  assert.ok(css.includes('.process-loader-spinner'));
+  assert.ok(supabase.includes('wp:supabase-start'));
+  assert.ok(supabase.includes('wp:supabase-end'));
+});
+
+test('ML readiness, training, and activation are handled automatically in the background', async () => {
+  const app = await read('../js/app.js');
+  assert.ok(app.includes("model.readiness?.eligible === true && model.status === 'ML_READY_TO_TRAIN'"));
+  assert.ok(app.includes("cloud.smartKasbon('evaluate_model')"));
+  assert.ok(app.includes("cloud.smartKasbon('activate_model', { version: training.version })"));
+  assert.ok(app.includes('smartKasbonMutationWithRetry'));
+});
+
+test('manual Smart Kasbon policy writes are rejected by the backend', async () => {
+  const edge = await read('../supabase/functions/smart-kasbon/index.ts');
+  assert.ok(edge.includes("if (action === 'set_policy')"));
+  assert.ok(edge.includes('status: 410'));
+  assert.ok(edge.includes("admin.rpc('smart_kasbon_auto_configure'"));
+});

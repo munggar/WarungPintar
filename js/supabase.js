@@ -30,7 +30,25 @@ function saveSession(value) {
   else localStorage.removeItem(SESSION_KEY);
 }
 
+function supabaseOperationMessage(path) {
+  if (path.includes('/functions/v1/smart-kasbon')) return 'Menghitung batas dan validasi kasbon...';
+  if (path.includes('/storage/v1/')) return 'Mengirim atau mengambil berkas toko...';
+  if (path.includes('/auth/v1/')) return 'Memproses autentikasi akun...';
+  return 'Menyimpan dan menyinkronkan data toko...';
+}
+
 async function request(path, options = {}, retry = true) {
+  window.dispatchEvent(new CustomEvent('wp:supabase-start', {
+    detail: { message: supabaseOperationMessage(path) },
+  }));
+  try {
+    return await performRequest(path, options, retry);
+  } finally {
+    window.dispatchEvent(new Event('wp:supabase-end'));
+  }
+}
+
+async function performRequest(path, options = {}, retry = true) {
   const responseType = options.responseType;
   const fetchOptions = { ...options };
   delete fetchOptions.responseType;
