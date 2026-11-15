@@ -443,9 +443,9 @@ export async function changeStoreName(name) {
   context.storeName = name;
 }
 
-export async function inviteAssistant() {
+export async function inviteAssistant(invitationCode = '') {
   if (!context || context.role !== 'owner') throw new Error('Hanya pemilik yang dapat mengundang asisten.');
-  return supabase.inviteAssistant();
+  return supabase.inviteAssistant(invitationCode);
 }
 
 export async function listAssistants() {
