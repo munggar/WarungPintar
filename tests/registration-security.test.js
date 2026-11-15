@@ -31,6 +31,9 @@ function createClients({
     async rpc(name, payload) {
       calls.push({ type: 'rpc', name, payload });
       if (name === 'consume_owner_registration_attempt') return { data: registrationAllowed, error: null };
+      if (name === 'reserve_owner_registration_invite') return { data: 'legacy-reservation', error: null };
+      if (name === 'complete_owner_registration_invite') return { data: true, error: null };
+      if (name === 'release_owner_registration_invite') return { data: true, error: null };
       throw new Error(`Unexpected RPC: ${name}`);
     },
     auth: {
@@ -63,7 +66,6 @@ test('hosted Auth config keeps public signup disabled and email confirmation dis
 test('validates owner registration without an administrator invite and ignores client-supplied role metadata', () => {
   const parsed = validateOwnerRegistrationPayload({
     ...validPayload,
-    invite_code: 'invalid-or-legacy-value',
     role: 'admin',
     app_metadata: { warungpintar_account_type: 'admin' },
   });
@@ -170,4 +172,23 @@ test('account is not deleted if password session issuance fails after Auth creat
   assert.equal(result.status, 503);
   assert.equal(result.body.code, 'registration_session_unavailable');
   assert.equal(calls.some((call) => call.type === 'deleteUser'), false);
+});
+
+test('legacy cached owner signup can finish a previously issued invitation during rollout', async () => {
+  const { admin, userClient, calls } = createClients();
+  const parsed = validateOwnerRegistrationPayload({
+    ...validPayload,
+    invite_code: 'A'.repeat(64),
+  });
+  assert.equal(parsed.ok, true);
+  const result = await registerOwner({
+    admin,
+    userClient,
+    rateLimitSecret: 'a'.repeat(32),
+    ...parsed.value,
+  });
+  assert.equal(result.status, 200);
+  const createCall = calls.find((call) => call.type === 'createUser');
+  assert.equal(createCall.attributes.user_metadata.owner_invite_reservation_id, 'legacy-reservation');
+  assert.equal(calls.some((call) => call.name === 'complete_owner_registration_invite'), true);
 });
