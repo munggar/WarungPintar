@@ -114,4 +114,5 @@ test('owner signup shows a disabled hidden assistant code field until now is sel
   assert.match(app, /<div id="assistant-invite-code-field" hidden>/);
   assert.match(app, /name="assistantInviteCode"[\s\S]*?disabled/);
   assert.match(app, /t\.id === 'assistant-invite-timing'[\s\S]*?field\.hidden = !enabled[\s\S]*?input\.required = enabled/);
+  assert.match(app, /chosenInviteCode[\s\S]*?invite\.invitation_code[\s\S]*?!== chosenInviteCode/);
 });
