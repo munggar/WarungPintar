@@ -1,5 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { hashAccountCode } from '../supabase/functions/_shared/account-recovery-security.js';
 import {
   hashAssistantInviteCode,
   normalizeAssistantInviteCode,
@@ -49,6 +50,7 @@ test('owner-defined assistant invite codes are normalized, hashed, and validated
   assert.equal(normalizeAssistantInviteCode(code), code.toLowerCase());
   assert.equal(normalizeAssistantInviteCode(code.toLowerCase()), code.toLowerCase());
   assert.match(await hashAssistantInviteCode(code), /^[0-9a-f]{64}$/);
+  assert.equal(await hashAssistantInviteCode('a'.repeat(64)), await hashAccountCode('a'.repeat(64)), 'legacy 64-character invitation hashes remain compatible');
   assert.equal(await hashAssistantInviteCode(code), await hashAssistantInviteCode(code.toLowerCase()));
   assert.throws(() => normalizeAssistantInviteCode('too-short'));
   assert.throws(() => normalizeAssistantInviteCode('INVALID CODE WITH SPACES'));
