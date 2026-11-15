@@ -237,10 +237,10 @@ export async function deleteStoreQris(storeId) {
   });
 }
 
-export async function inviteAssistant() {
+export async function inviteAssistant(invitationCode = '') {
   const { result } = await request('/functions/v1/invite-assistant', {
     method: 'POST',
-    body: JSON.stringify({}),
+    body: JSON.stringify(invitationCode ? { invitation_code: invitationCode } : {}),
   });
   return result;
 }
