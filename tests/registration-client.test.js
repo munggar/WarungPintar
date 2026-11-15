@@ -1,3 +1,4 @@
+import { readFile } from 'node:fs/promises';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
@@ -104,4 +105,13 @@ test('registration stores its immediate session and login uses password grant wi
     if (originalStorage) Object.defineProperty(globalThis, 'localStorage', originalStorage);
     else delete globalThis.localStorage;
   }
+});
+
+
+test('owner signup shows a disabled hidden assistant code field until now is selected', async () => {
+  const app = await readFile(new URL('../js/app.js', import.meta.url), 'utf8');
+  assert.match(app, /<select name="assistantInviteTiming" id="assistant-invite-timing">[\s\S]*?<option value="later" selected>Nanti saja<\/option>[\s\S]*?<option value="now">Isi kode undangan sekarang<\/option>/);
+  assert.match(app, /<div id="assistant-invite-code-field" hidden>/);
+  assert.match(app, /name="assistantInviteCode"[\s\S]*?disabled/);
+  assert.match(app, /t\.id === 'assistant-invite-timing'[\s\S]*?field\.hidden = !enabled[\s\S]*?input\.required = enabled/);
 });
