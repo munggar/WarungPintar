@@ -83,7 +83,7 @@ async function request(path, options = {}, retry = true) {
   return { result, headers: response.headers };
 }
 
-export async function register(email, password, storeName, inviteCode) {
+export async function register(email, password, storeName) {
   saveSession(null);
   const { result } = await request('/functions/v1/register-owner', {
     method: 'POST',
@@ -91,7 +91,6 @@ export async function register(email, password, storeName, inviteCode) {
       email,
       password,
       store_name: storeName,
-      invite_code: inviteCode,
     }),
   }, false);
   if (result?.access_token && result?.refresh_token) saveSession(result);

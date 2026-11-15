@@ -51,9 +51,14 @@ test('registration stores its immediate session and login uses password grant wi
 
   try {
     const client = await import('../js/supabase.js');
-    const registered = await client.register('owner@example.com', 'secure-password', 'Warung A', 'a'.repeat(64));
+    const registered = await client.register('owner@example.com', 'secure-password', 'Warung A');
     assert.deepEqual(registered, registrationSession);
     assert.deepEqual(JSON.parse(storage.get('warungpintar:supabase-session')), registrationSession);
+    assert.deepEqual(JSON.parse(calls.find((call) => call.path === '/functions/v1/register-owner').body), {
+      email: 'owner@example.com',
+      password: 'secure-password',
+      store_name: 'Warung A',
+    });
 
     const loggedIn = await client.login('owner@example.com', 'secure-password');
     assert.deepEqual(loggedIn, loginSession);
