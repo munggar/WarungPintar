@@ -283,7 +283,11 @@ async function fetchSmartKasbonQuote(customerId, force = false, refreshFinance =
       }
       assertSmartKasbonContext(expected);
       const pseudonymousCustomerId = await L.pseudonymousUuid('customer', customerId, expected.storeId);
-      const quote = await cloud.smartKasbon('quote', { customer_id: pseudonymousCustomerId });
+      const quote = await cloud.smartKasbon(
+        'quote',
+        { customer_id: pseudonymousCustomerId },
+        { silent: !refreshFinance },
+      );
       assertSmartKasbonContext(expected);
       if (S.metode === 'kasbon' && S.custId === customerId) {
         S.smartKasbonQuote = { ...quote, customerId, requestKey, loadedAt: Date.now() };
