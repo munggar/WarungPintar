@@ -2487,4 +2487,68 @@ addEventListener('online', netStatus); addEventListener('offline', netStatus);
     document.body.classList.add('app-ready');
   }
 })();
+const SEARCH_CLEAR_SELECTOR = 'input[type="search"], input[role="combobox"][aria-autocomplete="list"]';
+
+function updateSearchClearButton(input) {
+  const wrapper = input.closest('.search-input-wrap');
+  const button = wrapper?.querySelector('.search-clear-btn');
+  if (button) button.hidden = !input.value;
+}
+
+function enhanceSearchClearControls(root = document) {
+  const inputs = [];
+  if (root.nodeType === 1 && root.matches?.(SEARCH_CLEAR_SELECTOR)) inputs.push(root);
+  root.querySelectorAll?.(SEARCH_CLEAR_SELECTOR).forEach((input) => inputs.push(input));
+
+  for (const input of inputs) {
+    if (input.closest('.search-input-wrap')) {
+      updateSearchClearButton(input);
+      continue;
+    }
+    if (!input.parentNode) continue;
+
+    const wrapper = document.createElement('span');
+    wrapper.className = 'search-input-wrap';
+    input.parentNode.insertBefore(wrapper, input);
+    wrapper.appendChild(input);
+
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'search-clear-btn';
+    button.setAttribute('aria-label', 'Hapus kata pencarian');
+    button.title = 'Hapus pencarian';
+    button.innerHTML = '<svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" focusable="false"><path d="M18 6 6 18M6 6l12 12" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/></svg>';
+    button.hidden = !input.value;
+    wrapper.appendChild(button);
+  }
+}
+
+document.addEventListener('click', (event) => {
+  const button = event.target.closest?.('.search-clear-btn');
+  if (!button) return;
+  event.preventDefault();
+  event.stopPropagation();
+  const input = button.closest('.search-input-wrap')?.querySelector(SEARCH_CLEAR_SELECTOR);
+  if (!input) return;
+  input.value = '';
+  updateSearchClearButton(input);
+  input.dispatchEvent(new Event('input', { bubbles: true }));
+  input.focus();
+});
+
+document.addEventListener('input', (event) => {
+  const input = event.target;
+  if (input.matches?.(SEARCH_CLEAR_SELECTOR)) updateSearchClearButton(input);
+});
+
+enhanceSearchClearControls();
+const searchClearObserver = new MutationObserver((records) => {
+  for (const record of records) {
+    for (const node of record.addedNodes) {
+      if (node.nodeType === 1) enhanceSearchClearControls(node);
+    }
+  }
+});
+searchClearObserver.observe(document.body, { childList: true, subtree: true });
+
 window.addEventListener('afterprint', () => document.body.classList.remove('print-report'));
