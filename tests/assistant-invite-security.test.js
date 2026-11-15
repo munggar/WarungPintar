@@ -100,7 +100,7 @@ test('invalid, rate-limited, or duplicate assistant registrations cannot create 
   assert.equal(limited.calls.some((call) => call.kind === 'createUser'), false);
   assert.equal(limited.calls.some((call) => call.name === 'release_store_invite'), true);
 
-  const duplicate = createClients({ createError: new Error('duplicate user') });
+  const duplicate = createClients({ createError: Object.assign(new Error('duplicate user'), { status: 422, code: 'email_exists' }) });
   const duplicateResult = await registerAssistantWithInvite({
     admin: duplicate.admin,
     userClient: duplicate.userClient,

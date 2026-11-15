@@ -4,7 +4,6 @@ import { generateSmartKasbonDemoDataset } from '../scripts/generate-smart-kasbon
 import {
   assessSmartKasbonDataset,
   buildSmartKasbonTrainingDataset,
-  isSmartKasbonModelEvaluationEligible,
   splitSmartKasbonExamples,
   trainAndEvaluateSmartKasbonModel,
 } from '../supabase/functions/_shared/smart-kasbon-model.js';
@@ -21,7 +20,7 @@ test('synthetic Smart Kasbon demo is reproducible and stays separate from model 
   assert.ok(first.loans.every((loan) => !('label' in loan) && !('payment_history' in loan.decision_features)));
 });
 
-test('synthetic demo has mature, immature, grouped chronological holdout with actual eligible metrics', () => {
+test('synthetic demo is excluded from training and cannot create an ML candidate', () => {
   const dataset = generateSmartKasbonDemoDataset();
   const prepared = buildSmartKasbonTrainingDataset(
     dataset.loans,
@@ -33,22 +32,13 @@ test('synthetic demo has mature, immature, grouped chronological holdout with ac
   const trained = trainAndEvaluateSmartKasbonModel(prepared.examples, {
     trainedAt: Date.parse(dataset.metadata.generated_at),
   });
-  const trainingCustomers = new Set(split.training.map((row) => row.customerGroup));
 
-  assert.equal(prepared.examples.length, 1000);
-  assert.equal(prepared.exclusions.not_matured, 30);
-  assert.equal(readiness.eligible, true);
-  assert.equal(split.training.length, 800);
-  assert.equal(split.evaluation.length, 200);
-  assert.ok(split.evaluation.every((row) => !trainingCustomers.has(row.customerGroup)));
-  assert.equal(trained.state, 'candidate');
-  assert.equal(isSmartKasbonModelEvaluationEligible(trained.metrics), true);
-  assert.equal(trained.metrics.evaluation.sample_count, 200);
-  assert.equal(
-    trained.metrics.evaluation.confusion_matrix.true_positive
-      + trained.metrics.evaluation.confusion_matrix.false_positive
-      + trained.metrics.evaluation.confusion_matrix.true_negative
-      + trained.metrics.evaluation.confusion_matrix.false_negative,
-    200,
-  );
+  assert.equal(prepared.examples.length, 0);
+  assert.equal(prepared.exclusions.synthetic_demo_source, dataset.loans.length);
+  assert.equal(readiness.eligible, false);
+  assert.equal(readiness.state, 'RULE_BASED_ACTIVE');
+  assert.deepEqual(split.training, []);
+  assert.deepEqual(split.evaluation, []);
+  assert.equal(trained.state, 'insufficient_data');
+  assert.equal(trained.counts.eligible_count, 0);
 });

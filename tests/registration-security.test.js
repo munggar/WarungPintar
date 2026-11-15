@@ -111,8 +111,13 @@ test('owner invite creates a user, obtains a password session, and consumes the 
     'rpc',
     'rpc',
     'createUser',
-    'signInWithPassword',
     'rpc',
+    'signInWithPassword',
+  ]);
+  assert.deepEqual(calls.filter((call) => call.type === 'rpc').map((call) => call.name), [
+    'consume_owner_registration_attempt',
+    'reserve_owner_registration_invite',
+    'complete_owner_registration_invite',
   ]);
   assert.equal(calls.some((call) => /otp|verify|resend|email/i.test(call.type)), false);
 });
@@ -132,7 +137,7 @@ test('invalid owner invitation prevents user creation', async () => {
   assert.equal(calls.some((call) => call.type === 'signInWithPassword'), false);
 });
 
-test('owner registration rate limit blocks account creation and releases its invite reservation', async () => {
+test('owner registration rate limit blocks account creation before reserving the invite', async () => {
   const { admin, userClient, calls } = createClients({ registrationAllowed: false });
 
   const result = await registerOwnerWithInvite({
@@ -144,14 +149,15 @@ test('owner registration rate limit blocks account creation and releases its inv
 
   assert.equal(result.status, 429);
   assert.equal(calls.some((call) => call.type === 'createUser'), false);
-  assert.equal(calls.some((call) => call.name === 'release_owner_registration_invite'), true);
+  assert.equal(calls.some((call) => call.name === 'reserve_owner_registration_invite'), false);
+  assert.equal(calls.some((call) => call.name === 'release_owner_registration_invite'), false);
   const rateLimitCall = calls.find((call) => call.name === 'consume_owner_registration_attempt');
   assert.match(rateLimitCall.payload.p_email_hash, /^[0-9a-f]{64}$/);
 });
 
 test('duplicate email is rejected and the owner invite reservation is released', async () => {
   const { admin, userClient, calls } = createClients({
-    createUser: { data: { user: null }, error: new Error('duplicate user') },
+    createUser: { data: { user: null }, error: Object.assign(new Error('duplicate user'), { status: 422, code: 'email_exists' }) },
   });
 
   const result = await registerOwnerWithInvite({
@@ -166,7 +172,7 @@ test('duplicate email is rejected and the owner invite reservation is released',
   assert.equal(calls.some((call) => call.name === 'release_owner_registration_invite'), true);
 });
 
-test('missing session removes the newly created user and returns a login fallback code', async () => {
+test('missing session after completed registration preserves the created account and consumed invite', async () => {
   const { admin, userClient, calls } = createClients({
     login: { data: { session: null }, error: new Error('session unavailable') },
   });
@@ -180,6 +186,7 @@ test('missing session removes the newly created user and returns a login fallbac
 
   assert.equal(result.status, 503);
   assert.equal(result.body.code, 'registration_session_unavailable');
-  assert.equal(calls.some((call) => call.type === 'deleteUser'), true);
-  assert.equal(calls.some((call) => call.name === 'release_owner_registration_invite'), true);
+  assert.equal(calls.some((call) => call.type === 'deleteUser'), false);
+  assert.equal(calls.some((call) => call.name === 'complete_owner_registration_invite'), true);
+  assert.equal(calls.some((call) => call.name === 'release_owner_registration_invite'), false);
 });

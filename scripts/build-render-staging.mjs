@@ -196,7 +196,7 @@ function resolveLocalModulePath(importer, specifier, allowRootRelative = false) 
   return decodeURIComponent(resolvedUrl.pathname.replace(/^\/+/, ''));
 }
 
-async function verifyStaticAssetReferences(outputDir, files) {
+export async function verifyStaticAssetReferences(outputDir, files) {
   const normalizedFiles = new Set(files.map(toPosixPath));
   const references = [];
   const html = await readFile(path.join(outputDir, 'index.html'), 'utf8');
@@ -268,7 +268,7 @@ function moduleScriptSources(html) {
   return sources;
 }
 
-async function verifyJavaScriptDependencies(outputDir, files) {
+export async function verifyJavaScriptDependencies(outputDir, files) {
   const normalizedFiles = new Set(files.map(toPosixPath));
   const html = await readFile(path.join(outputDir, 'index.html'), 'utf8');
   const scriptSources = moduleScriptSources(html);
