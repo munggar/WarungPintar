@@ -1,4 +1,4 @@
-import { emailRateLimitFingerprint } from './account-recovery-security.js';
+import { createAccountRecoveryCode, emailRateLimitFingerprint, hashAccountCode } from './account-recovery-security.js';
 
 const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const INVITE_CODE_PATTERN = /^[0-9a-f]{64}$/i;
@@ -58,94 +58,149 @@ export async function registerOwner({
     };
   }
 
-  let created;
-  let createError;
-  try {
-    const response = await admin.auth.admin.createUser({
-      email,
-      password,
-      email_confirm: true,
-      user_metadata: {
-        store_name: storeName,
-        warungpintar_empty_vault: true,
-      },
-      // Authorization marker is written only by this server-side Admin API.
-      // Never accept role/owner flags from user-controlled registration metadata.
-      app_metadata: {
-        warungpintar_account_type: 'owner',
-      },
-    });
-    created = response.data;
-    createError = response.error;
-  } catch {
-    return {
-      status: 503,
-      body: {
-        code: 'registration_outcome_unknown',
-        error: 'Hasil pendaftaran belum dapat dipastikan. Jangan mendaftar ulang; coba masuk terlebih dahulu.',
-      },
-    };
-  }
+  // Auth Admin createUser does not reliably persist a supplied app_metadata marker
+  // before the auth.users INSERT trigger runs. Authorize this signup through the
+  // existing, service-role-only, single-use Owner invitation reservation instead.
+  const internalToken = createAccountRecoveryCode();
+  const tokenHash = await hashAccountCode(internalToken);
+  const { data: invitationCreated, error: invitationError } = await admin.rpc(
+    'create_internal_owner_registration_invite',
+    { p_email: email, p_token_hash: tokenHash },
+  );
+  if (invitationError) throw invitationError;
+  if (invitationCreated !== true) throw new Error('Reservasi pendaftaran Owner tidak dapat dibuat.');
 
-  if (createError) {
-    const status = typeof createError.status === 'number' ? createError.status : null;
-    if (status !== null && status >= 400 && status < 500) {
+  const { data: reservation, error: reserveError } = await admin.rpc(
+    'reserve_owner_registration_invite',
+    { p_token: internalToken, p_email: email },
+  );
+  if (reserveError) throw reserveError;
+  if (typeof reservation !== 'string') throw new Error('Reservasi pendaftaran Owner tidak dapat dikunci.');
+
+  const reservationId = reservation;
+  let inviteCompleted = false;
+  let preserveReservation = false;
+
+  try {
+    // From this point onward the Auth request may have succeeded even if its
+    // response is lost, so retain the reservation until it naturally expires.
+    preserveReservation = true;
+    let created;
+    let createError;
+    try {
+      const response = await admin.auth.admin.createUser({
+        email,
+        password,
+        email_confirm: true,
+        user_metadata: {
+          store_name: storeName,
+          warungpintar_empty_vault: true,
+          owner_invite_reservation_id: reservationId,
+        },
+      });
+      created = response.data;
+      createError = response.error;
+    } catch {
       return {
-        status: 400,
+        status: 503,
         body: {
-          code: 'registration_not_completed',
-          error: 'Pendaftaran tidak berhasil. Periksa kembali data atau masuk jika akun sudah pernah dibuat.',
+          code: 'registration_outcome_unknown',
+          error: 'Hasil pendaftaran belum dapat dipastikan. Jangan mendaftar ulang; coba masuk terlebih dahulu.',
         },
       };
     }
-    return {
-      status: 503,
-      body: {
-        code: 'registration_outcome_unknown',
-        error: 'Hasil pendaftaran belum dapat dipastikan. Jangan mendaftar ulang; coba masuk terlebih dahulu.',
-      },
-    };
-  }
 
-  const createdUserId = created?.user?.id;
-  if (!createdUserId) {
-    return {
-      status: 503,
-      body: {
-        code: 'registration_outcome_unknown',
-        error: 'Hasil pendaftaran belum dapat dipastikan. Jangan mendaftar ulang; coba masuk terlebih dahulu.',
-      },
-    };
-  }
+    if (createError) {
+      const status = typeof createError.status === 'number' ? createError.status : null;
+      if (status !== null && status >= 400 && status < 500) {
+        preserveReservation = false;
+        return {
+          status: 400,
+          body: {
+            code: createError.code === 'email_exists'
+              ? 'email_already_registered'
+              : 'registration_not_completed',
+            error: createError.code === 'email_exists'
+              ? 'Email ini sudah terdaftar. Silakan masuk menggunakan email tersebut atau gunakan email lain.'
+              : 'Pendaftaran tidak berhasil. Periksa kembali data pendaftaran Anda.',
+          },
+        };
+      }
+      return {
+        status: 503,
+        body: {
+          code: 'registration_outcome_unknown',
+          error: 'Hasil pendaftaran belum dapat dipastikan. Jangan mendaftar ulang; coba masuk terlebih dahulu.',
+        },
+      };
+    }
 
-  let login;
-  let loginError;
-  try {
-    const response = await userClient.auth.signInWithPassword({ email, password });
-    login = response.data;
-    loginError = response.error;
-  } catch {
-    return {
-      status: 503,
-      body: {
-        code: 'registration_session_unavailable',
-        error: 'Akun Owner mungkin sudah dibuat, tetapi sesi login belum tersedia. Jangan mendaftar ulang; coba masuk.',
-      },
-    };
-  }
-  if (loginError || !login?.session) {
-    return {
-      status: 503,
-      body: {
-        code: 'registration_session_unavailable',
-        error: 'Akun Owner mungkin sudah dibuat, tetapi sesi login belum tersedia. Jangan mendaftar ulang; coba masuk.',
-      },
-    };
-  }
+    const createdUserId = created?.user?.id;
+    if (!createdUserId) {
+      return {
+        status: 503,
+        body: {
+          code: 'registration_outcome_unknown',
+          error: 'Hasil pendaftaran belum dapat dipastikan. Jangan mendaftar ulang; coba masuk terlebih dahulu.',
+        },
+      };
+    }
 
-  return { status: 200, body: login.session };
+    const { data: completed, error: completeError } = await admin.rpc(
+      'complete_owner_registration_invite',
+      { p_reservation_id: reservationId, p_user_id: createdUserId },
+    );
+    if (completeError || completed !== true) {
+      return {
+        status: 503,
+        body: {
+          code: 'registration_outcome_unknown',
+          error: 'Akun Owner mungkin sudah dibuat, tetapi penyelesaian toko belum dapat dipastikan. Jangan mendaftar ulang; coba masuk.',
+        },
+      };
+    }
+    inviteCompleted = true;
+
+    let login;
+    let loginError;
+    try {
+      const response = await userClient.auth.signInWithPassword({ email, password });
+      login = response.data;
+      loginError = response.error;
+    } catch {
+      return {
+        status: 503,
+        body: {
+          code: 'registration_session_unavailable',
+          error: 'Akun Owner dan toko mungkin sudah dibuat, tetapi sesi login belum tersedia. Coba masuk dengan email dan kata sandi yang sama.',
+        },
+      };
+    }
+    if (loginError || !login?.session) {
+      return {
+        status: 503,
+        body: {
+          code: 'registration_session_unavailable',
+          error: 'Akun Owner dan toko mungkin sudah dibuat, tetapi sesi login belum tersedia. Coba masuk dengan email dan kata sandi yang sama.',
+        },
+      };
+    }
+
+    return { status: 200, body: login.session };
+  } finally {
+    if (reservationId && !inviteCompleted && !preserveReservation) {
+      try {
+        const { error: releaseError } = await admin.rpc(
+          'release_owner_registration_invite',
+          { p_reservation_id: reservationId },
+        );
+        if (releaseError) console.error('Pelepasan reservasi internal pendaftaran Owner gagal.');
+      } catch {
+        console.error('Pelepasan reservasi internal pendaftaran Owner gagal.');
+      }
+    }
+  }
 }
-
 
 export async function registerOwnerWithInvite({
   admin,
