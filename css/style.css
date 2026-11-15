@@ -119,7 +119,14 @@ main { width: min(100%, 720px); margin: 0 auto; padding: 14px 14px 24px; display
 .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; min-width: 0; }
 .row.wrap { flex-wrap: wrap; }
 .row.end { justify-content: flex-end; margin-top: 12px; }
-.row.search input { flex: 1; min-width: 0; }
+.row.search .search-input-wrap { flex: 1; min-width: 0; }
+.search-input-wrap { position: relative; display: block; width: 100%; min-width: 0; }
+.search-input-wrap > input { width: 100%; min-width: 0; padding-right: 44px; }
+.search-input-wrap > input[type="search"]::-webkit-search-cancel-button { -webkit-appearance: none; appearance: none; }
+.search-clear-btn { position: absolute; z-index: 2; top: 50%; right: 7px; transform: translateY(-50%); display: grid; place-items: center; width: 32px; height: 32px; min-height: 32px; padding: 0; border: 0; border-radius: 50%; background: transparent; color: var(--abu); cursor: pointer; }
+.search-clear-btn:hover { background: #eef2fc; color: var(--biru); }
+.search-clear-btn:focus-visible { outline: 2px solid var(--biru); outline-offset: 1px; }
+.search-clear-btn[hidden] { display: none; }
 
 /* Formulir */
 .field { display: grid; gap: 4px; margin: 10px 0; font-weight: 600; font-size: .92rem; }
