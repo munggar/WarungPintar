@@ -44,7 +44,14 @@ async function request(path, options = {}, retry = true) {
     detail: { message: supabaseOperationMessage(path) },
   }));
   try {
-    return await performRequest(path, options, retry);
+    const response = await performRequest(path, options, retry);
+    browserWindow?.dispatchEvent(new Event('wp:supabase-success'));
+    return response;
+  } catch (error) {
+    browserWindow?.dispatchEvent(new CustomEvent('wp:supabase-error', {
+      detail: { message: error?.message || 'Permintaan Supabase gagal.', code: error?.code || '' },
+    }));
+    throw error;
   } finally {
     browserWindow?.dispatchEvent(new Event('wp:supabase-end'));
   }
@@ -127,28 +134,62 @@ export async function login(email, password) {
   return result;
 }
 
+export function isInvalidRefreshTokenError(error) {
+  const code = String(error?.code || error?.error_code || '').toLowerCase();
+  const message = String(error?.message || error?.error_description || error?.error || '').toLowerCase();
+  return ['refresh_token_not_found', 'refresh_token_already_used', 'invalid_grant'].includes(code)
+    || /invalid refresh token|refresh token not found|refresh_token_not_found|refresh token already used|refresh_token_already_used|refresh token expired/.test(message);
+}
+
 export async function refreshSession() {
   const current = savedSession();
-  if (!current?.refresh_token) throw new Error('Sesi berakhir. Silakan masuk kembali.');
-  const { result } = await request('/auth/v1/token?grant_type=refresh_token', {
-    method: 'POST',
-    body: JSON.stringify({ refresh_token: current.refresh_token }),
-  }, false);
-  saveSession(result);
-  return result;
+  if (!current?.refresh_token) {
+    saveSession(null);
+    throw new SupabaseRequestError('Sesi lama sudah tidak berlaku. Silakan masuk kembali.', 401, 'stale_refresh_token');
+  }
+  try {
+    const { result } = await request('/auth/v1/token?grant_type=refresh_token', {
+      method: 'POST',
+      body: JSON.stringify({ refresh_token: current.refresh_token }),
+    }, false);
+    saveSession(result);
+    return result;
+  } catch (error) {
+    if (isInvalidRefreshTokenError(error)) {
+      saveSession(null);
+      throw new SupabaseRequestError(
+        'Sesi lama sudah tidak berlaku. Silakan masuk kembali dengan akun yang masih terdaftar.',
+        401,
+        'stale_refresh_token',
+      );
+    }
+    throw error;
+  }
 }
 
 export async function restoreSession() {
-  let current = savedSession();
+  const current = savedSession();
   const callback = new URLSearchParams(location.hash.replace(/^#/, ''));
   if (callback.has('access_token') || callback.has('refresh_token')) {
     history.replaceState(null, '', location.pathname + location.search);
   }
-  if (!current?.access_token) return null;
-  if (current.expires_at && current.expires_at < Date.now() / 1000 + 60) {
-    await refreshSession();
+  if (!current) return null;
+  if (!current.access_token) {
+    saveSession(null);
+    return { user: null, sessionExpired: true };
   }
-  return { user: await getUser() };
+  try {
+    if (current.expires_at && current.expires_at < Date.now() / 1000 + 60) {
+      await refreshSession();
+    }
+    return { user: await getUser() };
+  } catch (error) {
+    if (error?.code === 'stale_refresh_token' || isInvalidRefreshTokenError(error)) {
+      saveSession(null);
+      return { user: null, sessionExpired: true };
+    }
+    throw error;
+  }
 }
 
 export async function getUser() {
