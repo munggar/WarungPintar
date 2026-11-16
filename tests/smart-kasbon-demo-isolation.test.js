@@ -11,8 +11,9 @@ import {
 import { readFile } from 'node:fs/promises';
 
 test('isolated demo dataset uses deterministic synthetic groups and an independent chronological holdout', () => {
-  const first = generateSmartKasbonDemoTrainingExamples();
-  const second = generateSmartKasbonDemoTrainingExamples();
+  const options = { generatedAt: Date.parse('2026-11-16T12:00:00.000Z') };
+  const first = generateSmartKasbonDemoTrainingExamples(options);
+  const second = generateSmartKasbonDemoTrainingExamples(options);
   assert.deepEqual(first, second);
   assert.equal(first.synthetic, true);
   assert.equal(first.marker, SMART_KASBON_DEMO_MARKER);
