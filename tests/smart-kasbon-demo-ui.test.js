@@ -41,7 +41,7 @@ test('demo model card shows active status, Logistic Regression, dataset sizes an
   assert.ok(app.includes('evaluation_count'));
   assert.ok(app.includes('PR-AUC model / baseline'));
   assert.ok(app.includes('Brier model / baseline'));
-  assert.ok(app.includes('Rule-Based tetap menjadi penentu batas dan persetujuan.'));
+  assert.ok(app.includes('Rule-Based tetap menentukan batas dan persetujuan.'));
   assert.ok(app.includes('const demoSummary = smartKasbonDemoSummary();'));
   assert.ok(app.includes('const demoBanner = smartKasbonDemoSummary()'));
 });
