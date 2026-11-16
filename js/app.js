@@ -70,6 +70,111 @@ const S = {
   rep: { preset: 'bulan', from: L.ymd(new Date()), to: L.ymd(new Date()) }, showLunas: false,
 };
 const OWNER = () => S.role === 'owner';
+
+const ACCOUNT_STATUS_LABELS = {
+  online: 'Daring',
+  syncing: 'Menyinkronkan',
+  offline: 'Offline',
+  error: 'Eror',
+};
+let accountStatusState = navigator.onLine ? 'online' : 'offline';
+let accountStatusMessage = navigator.onLine ? 'Koneksi internet tersedia.' : 'Tidak ada koneksi internet.';
+let accountStatusDetail = 'Belum ada aktivitas sinkronisasi pada sesi ini.';
+let lastSuccessfulSyncAt = null;
+let supabaseRequestsInFlight = 0;
+
+function renderAccountStatusPanel() {
+  const panel = $('#account-status-panel');
+  if (!panel) return;
+  const account = S.account;
+  const label = ACCOUNT_STATUS_LABELS[accountStatusState] || 'Daring';
+  const lastSync = lastSuccessfulSyncAt
+    ? new Date(lastSuccessfulSyncAt).toLocaleString('id-ID', { dateStyle: 'medium', timeStyle: 'short', timeZone: 'Asia/Jakarta' }) + ' WIB'
+    : 'Belum tersinkron pada sesi ini';
+  panel.innerHTML = `
+    <div class="account-status-panel-head">
+      <strong>Status akun dan koneksi</strong>
+      <button type="button" class="account-status-panel-close" id="account-status-panel-close" aria-label="Tutup status">×</button>
+    </div>
+    <div class="account-status-panel-state">
+      <span class="account-status-panel-dot" data-state="${accountStatusState}" aria-hidden="true"></span>
+      <strong>${esc(label)}</strong>
+    </div>
+    <p>${esc(accountStatusMessage)}</p>
+    <dl>
+      <div><dt>Akun</dt><dd>${esc(account?.email || 'Belum masuk')}</dd></div>
+      <div><dt>Peran</dt><dd>${esc(account ? (S.role === 'owner' ? 'Owner' : 'Asisten') : '—')}</dd></div>
+      <div><dt>Sinkronisasi terakhir</dt><dd>${esc(lastSync)}</dd></div>
+      <div><dt>Aktivitas</dt><dd>${esc(accountStatusDetail)}</dd></div>
+    </dl>`;
+}
+
+function updateAccountStatus(state, message, detail = accountStatusDetail) {
+  if (!navigator.onLine && state !== 'error') state = 'offline';
+  accountStatusState = state;
+  accountStatusMessage = message || ACCOUNT_STATUS_LABELS[state];
+  accountStatusDetail = detail || '';
+  const button = $('#account-status');
+  if (button) {
+    button.dataset.state = state;
+    button.title = `Status akun: ${ACCOUNT_STATUS_LABELS[state]}. ${accountStatusMessage}`;
+    button.setAttribute('aria-label', button.title);
+  }
+  renderAccountStatusPanel();
+}
+
+window.addEventListener('wp:supabase-start', (event) => {
+  beginLoading(event.detail?.message || 'Menghubungkan ke server...');
+  supabaseRequestsInFlight += 1;
+  if (navigator.onLine) updateAccountStatus('syncing', event.detail?.message || 'Menghubungkan ke Supabase.');
+});
+window.addEventListener('wp:supabase-success', () => {
+  if (navigator.onLine && accountStatusState !== 'error') {
+    updateAccountStatus('online', 'Koneksi Supabase tersedia.', S.account ? 'Permintaan ke server berhasil.' : 'Server dapat dijangkau; belum ada akun yang masuk.');
+  }
+});
+window.addEventListener('wp:supabase-error', (event) => {
+  const message = event.detail?.message || 'Permintaan ke Supabase gagal.';
+  if (!navigator.onLine) updateAccountStatus('offline', 'Tidak ada koneksi internet.', message);
+  else updateAccountStatus('error', message, event.detail?.code || 'Periksa kembali koneksi dan status akun.');
+});
+window.addEventListener('wp:supabase-end', () => {
+  endLoading();
+  supabaseRequestsInFlight = Math.max(0, supabaseRequestsInFlight - 1);
+  if (supabaseRequestsInFlight === 0 && accountStatusState === 'syncing' && navigator.onLine) {
+    updateAccountStatus('online', 'Koneksi Supabase tersedia.', S.account ? 'Permintaan server selesai.' : 'Server dapat dijangkau; belum ada akun yang masuk.');
+  }
+});
+
+document.addEventListener('click', (event) => {
+  const button = event.target.closest?.('#account-status');
+  const panel = $('#account-status-panel');
+  if (button && panel) {
+    event.preventDefault();
+    renderAccountStatusPanel();
+    panel.hidden = !panel.hidden;
+    button.setAttribute('aria-expanded', String(!panel.hidden));
+    return;
+  }
+  if (event.target.closest?.('#account-status-panel-close')) {
+    panel.hidden = true;
+    $('#account-status')?.setAttribute('aria-expanded', 'false');
+    return;
+  }
+  if (panel && !panel.hidden && !event.target.closest?.('#account-status-panel')) {
+    panel.hidden = true;
+    $('#account-status')?.setAttribute('aria-expanded', 'false');
+  }
+});
+document.addEventListener('keydown', (event) => {
+  if (event.key === 'Escape') {
+    const panel = $('#account-status-panel');
+    if (panel && !panel.hidden) {
+      panel.hidden = true;
+      $('#account-status')?.setAttribute('aria-expanded', 'false');
+    }
+  }
+});
 const KATEGORI = ['Sembako', 'Makanan', 'Minuman', 'Rumah Tangga', 'Lainnya'];
 const BANKS = [
   { id: 'bri', name: 'Bank BRI', short: 'BRI' },
@@ -596,12 +701,26 @@ async function activateAccount(account, { syncRemote = false, rememberDevice = t
   });
   cloud.onSyncStatus(({ message, state }) => {
     const el = $('#sync');
-    if (!el || !S.account) return;
-    el.textContent = message;
-    el.className = 'chip ' + (state === 'ok' ? 'ok' : state === 'loading' ? 'loading' : 'warn');
-    if (state === 'ok' && message === 'Tersinkron ke cloud') scheduleSmartKasbonFinanceSync();
+    if (el && S.account) {
+      el.textContent = message;
+      el.className = 'chip ' + (state === 'ok' ? 'ok' : state === 'loading' ? 'loading' : 'warn');
+    }
+    if (state === 'ok') {
+      lastSuccessfulSyncAt = Date.now();
+      updateAccountStatus('online', 'Akun daring dan data berhasil disinkronkan.', message);
+      if (message === 'Tersinkron ke cloud') scheduleSmartKasbonFinanceSync();
+    } else if (state === 'loading') {
+      updateAccountStatus('syncing', 'Data sedang disinkronkan dengan Supabase.', message);
+    } else if (state === 'warn') {
+      updateAccountStatus(navigator.onLine ? 'error' : 'offline', message, 'Sinkronisasi memerlukan perhatian.');
+    } else if (state === 'error') {
+      updateAccountStatus(navigator.onLine ? 'error' : 'offline', message, 'Periksa koneksi atau coba sinkronkan kembali.');
+    }
   });
-  cloud.onSyncError((error) => toast('Sinkronisasi tidak berhasil: ' + error.message, 'err'));
+  cloud.onSyncError((error) => {
+    updateAccountStatus(navigator.onLine ? 'error' : 'offline', 'Sinkronisasi gagal.', error.message);
+    toast('Sinkronisasi tidak berhasil: ' + error.message, 'err');
+  });
   cloud.startAutoSync();
   render();
   if (rememberDevice) {
@@ -2427,6 +2546,14 @@ function netStatus() {
   el.setAttribute('aria-label', el.title);
   const sync = $('#sync');
   if (sync && S.account && !on) { sync.textContent = 'Luring — tersimpan terenkripsi'; sync.className = 'chip warn'; }
+  if (!on) updateAccountStatus('offline', 'Tidak ada koneksi internet.', offlineDataAvailable
+    ? 'Data lokal tetap tersimpan terenkripsi di perangkat dan akan disinkronkan saat online.'
+    : 'Belum ada data offline yang tersedia pada perangkat ini.');
+  else if (accountStatusState === 'offline') {
+    updateAccountStatus(S.account ? 'syncing' : 'online', S.account
+      ? 'Koneksi kembali tersedia. Memeriksa sinkronisasi.'
+      : 'Koneksi internet tersedia.', S.account ? 'Menunggu pemeriksaan sinkronisasi.' : 'Belum ada akun yang masuk.');
+  }
 }
 addEventListener('online', netStatus); addEventListener('offline', netStatus);
 
@@ -2445,7 +2572,11 @@ addEventListener('online', netStatus); addEventListener('offline', netStatus);
   try {
     if (navigator.storage?.persist) await navigator.storage.persist();
     const authState = await supabase.restoreSession();
-    if (authState?.user) {
+    if (authState?.sessionExpired) {
+      S.authEmail = '';
+      renderAuth('Sesi lama sudah tidak berlaku karena akun sebelumnya telah dihapus atau dinonaktifkan. Masuk kembali menggunakan akun yang masih terdaftar, atau daftarkan akun Owner baru.');
+      updateAccountStatus('error', 'Sesi lama tidak berlaku.', 'Token perangkat dibersihkan otomatis. Data lokal terenkripsi tidak dihapus.');
+    } else if (authState?.user) {
       S.authEmail = authState.user.email || '';
       try {
         const account = await cloud.unlockRememberedDevice(authState.user.id);
