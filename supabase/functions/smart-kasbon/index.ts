@@ -268,7 +268,38 @@ async function setupSmartKasbonDemo(admin: AdminClient, storeId: string, ownerId
     };
   }
 
+  const { data: reserved, error: reserveError } = await admin.rpc('reserve_smart_kasbon_model_training', {
+    p_store_id: storeId,
+  });
+  if (reserveError) throw reserveError;
+  if (reserved !== true) {
+    return {
+      state: 'ML_TRAINING',
+      training_count: 0,
+      evaluation_count: 0,
+      synthetic_demo: true,
+      demo_marker: SMART_KASBON_DEMO_MARKER,
+      expires_at: demoRegistration.expires_at,
+      already_training: true,
+      advisory_only: true,
+    };
+  }
+
   const now = new Date();
+  const { error: reservationStatusError } = await admin.from('smart_kasbon_model_training_attempts').upsert({
+    store_id: storeId,
+    attempted_at: now.toISOString(),
+    state: 'ML_TRAINING',
+    eligible_count: 0,
+    on_time_count: 0,
+    late_count: 0,
+    exclusion_counts: {},
+    last_error_code: null,
+    last_trained_at: null,
+    updated_at: now.toISOString(),
+  }, { onConflict: 'store_id' });
+  if (reservationStatusError) throw reservationStatusError;
+
   const generated = generateSmartKasbonDemoTrainingExamples({ generatedAt: now.getTime() });
   const training = trainAndEvaluateSmartKasbonModel(generated.examples, {
     trainedAt: now.getTime(),
@@ -582,6 +613,12 @@ Deno.serve(async (request) => {
         reasons,
       };
     } else if (action === 'dashboard') {
+      // Registered demo owners must not depend on a particular browser build to initialise ML.
+      // Prepare the isolated synthetic model server-side before composing the dashboard.
+      if (demoRegistration && membership.role === 'owner') {
+        await setupSmartKasbonDemo(admin, storeId, userData.user.id, demoRegistration);
+      }
+
       const [policyResult, decisionsResult, modelsResult, activeModelResult, trainingStatusResult] = await Promise.all([
         admin.from('smart_kasbon_policies').select('*').eq('store_id', storeId).maybeSingle(),
         admin.from('smart_kasbon_decisions').select('id,loan_id,customer_id,action,approved,decision,created_at').eq('store_id', storeId).order('id', { ascending: false }).limit(20),
