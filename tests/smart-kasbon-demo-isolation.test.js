@@ -84,3 +84,16 @@ test('demo registry is isolated to service role and expires within 30 days', asy
   assert.ok(migration.includes('revoke all on public.smart_kasbon_demo_stores from public, anon, authenticated'));
   assert.ok(migration.includes('grant all on public.smart_kasbon_demo_stores to service_role'));
 });
+
+
+test('registered demo owner dashboard automatically prepares its isolated model with a training reservation', async () => {
+  const source = await readFile(new URL('../supabase/functions/smart-kasbon/index.ts', import.meta.url), 'utf8');
+  const dashboardStart = source.indexOf("} else if (action === 'dashboard') {");
+  const autoSetup = source.indexOf("await setupSmartKasbonDemo(admin, storeId, userData.user.id, demoRegistration);", dashboardStart);
+  const dashboardQueries = source.indexOf('const [policyResult, decisionsResult, modelsResult, activeModelResult, trainingStatusResult]', dashboardStart);
+  assert.ok(dashboardStart >= 0);
+  assert.ok(autoSetup > dashboardStart && autoSetup < dashboardQueries);
+  assert.ok(source.includes("admin.rpc('reserve_smart_kasbon_model_training'"));
+  assert.ok(source.includes("state: 'ML_TRAINING'"));
+  assert.ok(source.includes("demoRegistration && membership.role === 'owner'"));
+});
