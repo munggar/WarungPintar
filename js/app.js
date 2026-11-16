@@ -435,6 +435,187 @@ window.addEventListener('focus', refreshKasbonQuoteOnResume);
 window.addEventListener('online', refreshKasbonQuoteOnResume);
 document.addEventListener('visibilitychange', refreshKasbonQuoteOnResume);
 
+const SMART_KASBON_DEMO_STORE_NAME = 'DEMO SMART KASBON - SIMULASI';
+const SMART_KASBON_DEMO_DATA_VERSION = '20261116-v1';
+
+function createDemoRandom(seed = 20261116) {
+  let state = seed >>> 0;
+  return () => {
+    state += 0x6d2b79f5;
+    let value = state;
+    value = Math.imul(value ^ (value >>> 15), value | 1);
+    value ^= value + Math.imul(value ^ (value >>> 7), value | 61);
+    return ((value ^ (value >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+function demoPastDate(random, minimumDays, maximumDays) {
+  const days = minimumDays + Math.floor(random() * (maximumDays - minimumDays + 1));
+  const date = new Date(Date.now() - days * 86400000);
+  date.setHours(8 + Math.floor(random() * 11), Math.floor(random() * 60), 0, 0);
+  return date.toISOString();
+}
+
+async function seedSmartKasbonDemoVault(expected) {
+  assertSmartKasbonContext(expected);
+  if (S.cfg.smartKasbonDemoDataVersion === SMART_KASBON_DEMO_DATA_VERSION) return false;
+
+  const data = await db.exportAll();
+  const businessStores = ['products', 'sales', 'purchases', 'expenses', 'customers', 'debts', 'payments', 'withdrawals'];
+  if (businessStores.some((name) => (data[name] || []).length > 0)) {
+    return false;
+  }
+
+  const random = createDemoRandom();
+  const catalogue = [
+    ['Beras Premium 5 kg', 'Sembako', 'karung', 68000, 79000],
+    ['Minyak Goreng 1 L', 'Sembako', 'pouch', 15500, 18500],
+    ['Gula Pasir 1 kg', 'Sembako', 'kg', 14500, 17000],
+    ['Tepung Terigu 1 kg', 'Sembako', 'pack', 10500, 13000],
+    ['Telur Ayam 1 kg', 'Sembako', 'kg', 25500, 30000],
+    ['Mi Instan Goreng', 'Makanan', 'pcs', 2700, 3500],
+    ['Kopi Sachet', 'Minuman', 'sachet', 1200, 1800],
+    ['Teh Celup 25 kantong', 'Minuman', 'box', 8500, 11000],
+    ['Air Mineral 600 ml', 'Minuman', 'botol', 2500, 4000],
+    ['Susu UHT 1 L', 'Minuman', 'kotak', 14500, 17500],
+    ['Sabun Cuci 800 g', 'Kebutuhan Rumah', 'pack', 14500, 18000],
+    ['Biskuit Keluarga', 'Makanan', 'pack', 9000, 12000],
+    ['Kecap Manis 600 ml', 'Bumbu', 'botol', 11500, 14500],
+    ['Sarden Kaleng', 'Makanan', 'kaleng', 12500, 16000],
+    ['Air Galon Isi Ulang', 'Minuman', 'galon', 6500, 10000],
+  ];
+  const products = catalogue.map(([nama, kategori, satuan, hargaBeli, hargaJual], index) => ({
+    id: uid(),
+    createdAt: demoPastDate(random, 68, 78),
+    nama,
+    kategori,
+    hargaBeli,
+    hargaJual,
+    stok: 30 + Math.floor(random() * 21),
+    stokMinimum: 8 + Math.floor(random() * 5),
+    satuan,
+    barcode: `DEMO-WP-${String(index + 1).padStart(4, '0')}`,
+  }));
+  const customerNames = [
+    'Pelanggan Demo 001', 'Pelanggan Demo 002', 'Pelanggan Demo 003', 'Pelanggan Demo 004',
+    'Pelanggan Demo 005', 'Pelanggan Demo 006', 'Pelanggan Demo 007', 'Pelanggan Demo 008',
+    'Pelanggan Demo 009', 'Pelanggan Demo 010', 'Pelanggan Demo 011', 'Pelanggan Demo 012',
+    'Pelanggan Demo 013', 'Pelanggan Demo 014', 'Pelanggan Demo 015', 'Pelanggan Demo 016',
+    'Pelanggan Demo 017', 'Pelanggan Demo 018', 'Pelanggan Demo 019', 'Pelanggan Demo 020',
+    'Pelanggan Demo 021', 'Pelanggan Demo 022', 'Pelanggan Demo 023', 'Pelanggan Demo 024',
+    'Pelanggan Demo 025',
+  ];
+  const customers = customerNames.map((nama) => ({ id: uid(), nama, wa: '' }));
+  const sold = Array(products.length).fill(0);
+  const sales = [];
+
+  for (let transactionIndex = 0; transactionIndex < 120; transactionIndex += 1) {
+    const itemCount = 1 + Math.floor(random() * 3);
+    const selected = new Set();
+    while (selected.size < itemCount) selected.add(Math.floor(random() * products.length));
+    const items = [...selected].map((productIndex) => {
+      const product = products[productIndex];
+      const qty = 1 + Math.floor(random() * 4);
+      sold[productIndex] += qty;
+      return {
+        productId: product.id,
+        nama: product.nama,
+        qty,
+        hargaJual: product.hargaJual,
+        hargaBeliSaatItu: product.hargaBeli,
+      };
+    });
+    const customer = customers[Math.floor(random() * customers.length)];
+    sales.push({
+      id: uid(),
+      waktu: demoPastDate(random, 0, 59),
+      items,
+      metode: random() > 0.45 ? 'tunai' : 'transfer',
+      customerId: null,
+      customerName: customer.nama,
+      namaKasir: 'Demo Kasir',
+      statusPembayaran: 'berhasil',
+      demoSynthetic: true,
+    });
+  }
+  sales.sort((a, b) => a.waktu.localeCompare(b.waktu));
+
+  const purchases = products.map((product, index) => {
+    const qty = sold[index] + product.stok;
+    return {
+      id: uid(),
+      waktu: demoPastDate(random, 65, 72),
+      productId: product.id,
+      nama: product.nama,
+      qty,
+      hargaBeli: product.hargaBeli,
+      total: qty * product.hargaBeli,
+      supplier: 'Distributor Demo',
+      demoSynthetic: true,
+    };
+  });
+  const expenseCategories = ['Listrik', 'Transportasi', 'Kemasan', 'Lainnya'];
+  const expenses = Array.from({ length: 24 }, () => ({
+    id: uid(),
+    kategori: expenseCategories[Math.floor(random() * expenseCategories.length)],
+    jumlah: [45000, 65000, 85000, 120000, 150000, 175000][Math.floor(random() * 6)],
+    waktu: demoPastDate(random, 0, 59),
+    catatan: 'Data simulasi demonstrasi',
+    demoSynthetic: true,
+  }));
+  const withdrawals = Array.from({ length: 5 }, () => ({
+    id: uid(),
+    jumlah: [100000, 150000, 200000, 250000][Math.floor(random() * 4)],
+    waktu: demoPastDate(random, 0, 59),
+    catatan: 'Simulasi penarikan pribadi',
+    demoSynthetic: true,
+  }));
+
+  assertSmartKasbonContext(expected);
+  data.products = products;
+  data.sales = sales;
+  data.purchases = purchases;
+  data.expenses = expenses;
+  data.customers = customers;
+  data.withdrawals = withdrawals;
+  data.settings = [
+    ...(data.settings || []).filter((row) => row.key !== 'smartKasbonDemoDataVersion'),
+    { key: 'smartKasbonDemoDataVersion', value: SMART_KASBON_DEMO_DATA_VERSION },
+  ];
+  await db.importAll(data);
+  assertSmartKasbonContext(expected);
+  await load();
+  return true;
+}
+
+function smartKasbonDemoSummary() {
+  if (S.smartKasbon?.demo_mode !== true) return '';
+  const active = S.smartKasbon?.model?.active_model;
+  const metrics = active?.metrics || {};
+  const evaluation = metrics.evaluation || {};
+  const baseline = metrics.baseline || {};
+  const metric = (value, digits = 3) => Number.isFinite(value) ? Number(value).toFixed(digits) : '—';
+  const status = active
+    ? 'Machine Learning aktif · prediksi advisory'
+    : 'Machine Learning belum aktif · Rule-Based digunakan';
+  return `<section class="card smart-kasbon-demo-card" aria-label="Status demonstrasi Smart Kasbon">
+    <div class="row" style="align-items:center;justify-content:space-between">
+      <strong>Smart Kasbon · Demonstrasi</strong>
+      <span class="chip warn">DATA SIMULASI</span>
+    </div>
+    <p><b>${status}</b></p>
+    <p class="muted small">Algoritma: Logistic Regression · Sumber: dataset sintetis terisolasi · bukan transaksi pelanggan nyata.</p>
+    <div class="grid2">
+      <div class="stat"><span>Data training</span><b>${Number(active?.training_count || 0).toLocaleString('id-ID')}</b></div>
+      <div class="stat"><span>Data evaluasi</span><b>${Number(active?.evaluation_count || 0).toLocaleString('id-ID')}</b></div>
+      <div class="stat"><span>PR-AUC model / baseline</span><b>${metric(evaluation.pr_auc)} / ${metric(baseline.pr_auc)}</b></div>
+      <div class="stat"><span>Brier model / baseline</span><b>${metric(evaluation.brier_score)} / ${metric(baseline.brier_score)}</b></div>
+    </div>
+    <p class="muted small">ECE: ${metric(evaluation.expected_calibration_error)} · Model hanya memberi prediksi risiko; Rule-Based tetap menentukan batas dan persetujuan.</p>
+    <div class="row"><a class="btn small" href="#/kasbon">Buka Smart Kasbon</a></div>
+  </section>`;
+}
+
 async function fetchSmartKasbon(force = false) {
   const expected = cloud.currentContext();
   const storeId = expected?.storeId;
@@ -492,6 +673,13 @@ async function fetchSmartKasbon(force = false) {
         }
       }
       S.smartKasbon = dashboard;
+      if (dashboard.demo_mode === true && expected.role === 'owner') {
+        const seeded = await seedSmartKasbonDemoVault(expected);
+        if (seeded) {
+          assertSmartKasbonContext(expected);
+          render();
+        }
+      }
     } catch (error) {
       const current = cloud.currentContext();
       if (current?.userId === expected?.userId && current.storeId === storeId) {
@@ -746,6 +934,16 @@ async function activateAccount(account, { syncRemote = false, rememberDevice = t
     } catch (error) {
       console.error('Initial cloud sync failed', error);
       toast('Berhasil masuk, tetapi sinkronisasi awal tidak berhasil: ' + error.message, 'err');
+    }
+  }
+  if (account?.storeName === SMART_KASBON_DEMO_STORE_NAME && navigator.onLine) {
+    try {
+      await withLoading(() => fetchSmartKasbon(true), 'Menyiapkan data usaha dan Machine Learning untuk demonstrasi...');
+      await cloud.syncNow();
+      render();
+    } catch (error) {
+      console.error('Smart Kasbon demo preparation failed', error);
+      toast('Akun demo berhasil dibuka, tetapi persiapan data demo belum selesai: ' + error.message, 'err');
     }
   }
 }
@@ -1031,11 +1229,12 @@ window.addEventListener('hashchange', render);
 /* ============ Beranda ============ */
 function vBeranda() {
   const now = new Date();
+  const demoSummary = smartKasbonDemoSummary();
   const today = L.summarize(S, L.startOfDay(now), L.endOfDay(now));
   const month = L.summarize(S, new Date(now.getFullYear(), now.getMonth(), 1), L.endOfDay(now));
   const piutang = L.totalReceivable(S.debts, S.payments);
   if (!S.products.length) {
-    return `<section class="nota"><h2>Mulai dengan menambahkan produk</h2><p>Tambahkan produk, lalu catat penjualan melalui menu Kasir. Ringkasan laba rugi akan diperbarui secara otomatis.</p><div class="row"><a class="btn primary" href="#/produk">Tambah produk</a></div></section>`;
+    return `${demoSummary}<section class="nota"><h2>Mulai dengan menambahkan produk</h2><p>Tambahkan produk, lalu catat penjualan melalui menu Kasir. Ringkasan laba rugi akan diperbarui secara otomatis.</p><div class="row"><a class="btn primary" href="#/produk">Tambah produk</a></div></section>`;
   }
   const hs = L.healthScore(S, now);
   const low = L.lowStock(S.products, S.sales, now, Number(S.cfg.leadDays || 2));
@@ -1043,6 +1242,7 @@ function vBeranda() {
   const over = S.debts.filter((d) => L.isOverdue(d, S.payments, now));
   const cust = (id) => S.customers.find((c) => c.id === id) || { nama: 'Pelanggan' };
   return `
+  ${demoSummary}
   <section class="nota hero">
     <p class="muted">Laba kotor hari ini</p>
     <p class="angka ${today.labaKotor < 0 ? 'neg' : 'pos'}">${rp(today.labaKotor)}</p>
@@ -1700,20 +1900,10 @@ function vKasbon() {
       </span>
       <span class="right"><b>${rp(sisa)}</b><small>dari total ${rp(d.jumlah)}</small><span class="acts">${sisa > 0 ? `<button class="btn small" data-act="paydebt" data-id="${esc(d.id)}">Catat pembayaran</button><a class="btn small ghost" target="_blank" rel="noopener" href="${L.waLink(c.wa, L.reminderText(c.nama, sisa, S.cfg.toko, d.jatuhTempo))}">Kirim pengingat</a>` : '<span class="chip ok">Lunas</span>'}</span></span></li>`;
   };
-  const demoModel = S.smartKasbon?.model?.active_model;
-  const demoBanner = S.smartKasbon?.demo_mode === true
-    ? `<section class="card" aria-label="Mode demonstrasi Smart Kasbon">
-        <div class="row" style="align-items:center;justify-content:space-between">
-          <strong>Smart Kasbon · Demonstrasi</strong>
-          <span class="chip warn">DATA SIMULASI</span>
-        </div>
-        <p>Riwayat pelatihan dan metrik dibuat secara sintetis untuk demonstrasi. Data ini bukan transaksi pelanggan nyata dan tidak digunakan untuk melatih model toko lain.</p>
-        <p><strong>${demoModel ? 'Machine Learning aktif (advisory)' : 'Menyiapkan model Machine Learning...'}</strong></p>
-        ${demoModel ? `<small>Training: ${Number(demoModel.training_count || 0)} observasi · Evaluasi: ${Number(demoModel.evaluation_count || 0)} observasi</small>` : ''}
-        ${S.smartKasbon.demo_expires_at ? `<small>Berlaku sampai ${esc(fmtDateTime(S.smartKasbon.demo_expires_at))}</small>` : ''}
-        <small>Rule-Based tetap menjadi penentu batas dan persetujuan kasbon.</small>
-      </section>`
-    : '';
+  const demoBanner = smartKasbonDemoSummary()
+    + (S.smartKasbon?.demo_mode === true && S.smartKasbon?.demo_expires_at
+      ? `<p class="muted small">Akun simulasi berlaku sampai ${esc(fmtDateTime(S.smartKasbon.demo_expires_at))}.</p>`
+      : '');
   return `${demoBanner}<section class="grid2"><div class="stat"><span>Total piutang</span><b>${rp(L.totalReceivable(S.debts, S.payments))}</b></div><div class="stat"><span>Pelanggan</span><b>${S.customers.length}</b></div></section>
   <div class="row"><button class="btn primary" data-act="newcust2">Tambah pelanggan</button>${OWNER() ? '<button class="btn" data-act="manualdebt">Catat kasbon manual</button>' : ''}</div>
   <h2>Belum lunas</h2><ul class="rows tall">${open.length ? open.map(row).join('') : '<li class="muted">Tidak ada kasbon yang belum lunas.</li>'}</ul>
