@@ -129,7 +129,7 @@ window.addEventListener('wp:supabase-start', (event) => {
   if (navigator.onLine) updateAccountStatus('syncing', event.detail?.message || 'Menghubungkan ke Supabase.');
 });
 window.addEventListener('wp:supabase-success', () => {
-  if (navigator.onLine && accountStatusState !== 'error') {
+  if (navigator.onLine && accountStatusState !== 'error' && supabaseRequestsInFlight <= 1) {
     updateAccountStatus('online', 'Koneksi Supabase tersedia.', S.account ? 'Permintaan ke server berhasil.' : 'Server dapat dijangkau; belum ada akun yang masuk.');
   }
 });
