@@ -40,7 +40,7 @@ test('invalid or revoked Supabase refresh token is cleared as stale session', as
   const supabase = await read('../js/supabase.js');
   assert.ok(supabase.includes('export function isInvalidRefreshTokenError(error)'));
   assert.ok(supabase.includes('refresh_token_not_found'));
-  assert.ok(supabase.includes('Invalid Refresh Token'));
+  assert.ok(supabase.includes('invalid refresh token'));
   assert.ok(supabase.includes("throw new SupabaseRequestError('Sesi lama sudah tidak berlaku."));
   assert.ok(supabase.includes("saveSession(null);"));
   assert.ok(supabase.includes("return { user: null, sessionExpired: true };"));
