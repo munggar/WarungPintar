@@ -76,7 +76,7 @@ test('Smart Kasbon Edge Function only accepts demo provenance through the active
 });
 
 test('demo registry is isolated to service role and expires within 30 days', async () => {
-  const migration = await readFile(new URL('../supabase/migrations/202611180005_smart_kasbon_demo_tenant.sql', import.meta.url), 'utf8');
+  const migration = await readFile(new URL('../supabase/migrations/20261116114427_smart_kasbon_demo_tenant.sql', import.meta.url), 'utf8');
   assert.ok(migration.includes('references public.stores(id) on delete cascade'));
   assert.ok(migration.includes('references auth.users(id) on delete cascade'));
   assert.ok(migration.includes("marker = 'SYNTHETIC_SMART_KASBON_DEMO_V1'"));
