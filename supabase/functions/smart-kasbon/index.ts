@@ -15,6 +15,10 @@ import {
 } from '../_shared/smart-kasbon-model.js';
 import { persistSmartKasbonPrediction } from '../_shared/smart-kasbon-decision.js';
 import { deriveSmartKasbonAutoPolicy } from '../_shared/smart-kasbon-policy.js';
+import {
+  generateSmartKasbonDemoTrainingExamples,
+  SMART_KASBON_DEMO_MARKER,
+} from '../_shared/smart-kasbon-demo.js';
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const MODEL_VERSION_PATTERN = /^sklr-v1-\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
@@ -215,9 +219,189 @@ async function updateModelTrainingStatus(
   if (error) throw error;
 }
 
+async function getDemoRegistration(admin: AdminClient, storeId: string) {
+  const { data, error } = await admin.from('smart_kasbon_demo_stores')
+    .select('store_id,owner_id,marker,created_at,expires_at,seeded_at')
+    .eq('store_id', storeId).maybeSingle();
+  if (error) throw error;
+  if (!data || data.marker !== SMART_KASBON_DEMO_MARKER
+    || !Number.isFinite(Date.parse(data.expires_at))
+    || Date.parse(data.expires_at) <= Date.now()) return null;
+  const { data: store, error: storeError } = await admin.from('stores')
+    .select('owner_id').eq('id', storeId).maybeSingle();
+  if (storeError) throw storeError;
+  if (!store || store.owner_id !== data.owner_id) return null;
+  return data;
+}
+
+function smartKasbonModelEligibleForStore(metrics, demoRegistration, minimums) {
+  if (demoRegistration) {
+    return metrics?.training_source === 'isolated_demo_synthetic'
+      && metrics?.demo_marker === SMART_KASBON_DEMO_MARKER
+      && metrics?.synthetic_demo === true
+      && isSmartKasbonModelEvaluationEligible(metrics, minimums);
+  }
+  return isSmartKasbonModelProductionEligible(metrics, minimums);
+}
+
+async function setupSmartKasbonDemo(admin: AdminClient, storeId: string, ownerId: string, demoRegistration) {
+  if (!demoRegistration || demoRegistration.marker !== SMART_KASBON_DEMO_MARKER
+    || demoRegistration.owner_id !== ownerId) {
+    throw new ValidationError('Toko ini tidak terdaftar sebagai akun demo Smart Kasbon yang diizinkan.');
+  }
+  const minimums = configuredModelMinimums();
+  const { data: currentModel, error: currentModelError } = await admin.from('smart_kasbon_model_versions')
+    .select('version,feature_version,model,metrics,training_count,evaluation_count')
+    .eq('store_id', storeId).eq('state', 'active').maybeSingle();
+  if (currentModelError) throw currentModelError;
+  if (currentModel && smartKasbonModelEligibleForStore(currentModel.metrics, demoRegistration, minimums)) {
+    return {
+      state: 'ML_ACTIVE',
+      version: currentModel.version,
+      training_count: currentModel.training_count,
+      evaluation_count: currentModel.evaluation_count,
+      synthetic_demo: true,
+      demo_marker: SMART_KASBON_DEMO_MARKER,
+      expires_at: demoRegistration.expires_at,
+      already_prepared: true,
+      advisory_only: true,
+    };
+  }
+
+  const now = new Date();
+  const generated = generateSmartKasbonDemoTrainingExamples({ generatedAt: now.getTime() });
+  const training = trainAndEvaluateSmartKasbonModel(generated.examples, {
+    trainedAt: now.getTime(),
+    minimums,
+  });
+  if (training.state !== 'candidate' || !training.model || !training.metrics) {
+    await admin.from('smart_kasbon_model_training_attempts').upsert({
+      store_id: storeId,
+      attempted_at: now.toISOString(),
+      state: 'RULE_BASED_FALLBACK',
+      eligible_count: training.counts?.eligible_count ?? 0,
+      on_time_count: 0,
+      late_count: 0,
+      exclusion_counts: {},
+      last_error_code: 'DATASET_INVALID',
+      updated_at: now.toISOString(),
+    }, { onConflict: 'store_id' });
+    throw new ValidationError(training.reason || 'Dataset sintetis demo belum memenuhi ambang evaluasi.');
+  }
+
+  const activationEligible = isSmartKasbonModelEvaluationEligible({
+    ...training.metrics,
+    activation_eligible: true,
+  }, minimums);
+  if (!activationEligible) {
+    throw new ValidationError('Model demo gagal mengungguli baseline evaluasi; model tidak diaktifkan.');
+  }
+  validateSmartKasbonModelArtifact(training.model);
+
+  const snapshot = financeSnapshot({
+    revenue_7: 3500000,
+    revenue_30: 12000000,
+    revenue_previous_30: 10000000,
+    hpp_30: 6000000,
+    operating_expenses_30: 2000000,
+    gross_profit_30: 6000000,
+    net_profit_30: 4000000,
+    net_profit_previous_30: 3000000,
+    cash_in_30: 14000000,
+    cash_out_30: 6000000,
+    cash_flow_30: 8000000,
+    has_sales_30: true,
+    generated_at: now.toISOString(),
+  });
+  const policy = deriveSmartKasbonAutoPolicy(snapshot);
+  const { error: policyError } = await admin.rpc('smart_kasbon_auto_configure', {
+    p_store_id: storeId,
+    p_actor: ownerId,
+    p_policy: policy,
+    p_financial_snapshot: snapshot,
+  });
+  if (policyError) throw policyError;
+
+  const metrics = {
+    ...training.metrics,
+    training_source: 'isolated_demo_synthetic',
+    demo_marker: SMART_KASBON_DEMO_MARKER,
+    synthetic_demo: true,
+    synthetic_demo_rows: generated.examples.length,
+    synthetic_demo_customers: generated.training_customers + generated.evaluation_customers,
+    synthetic_demo_seed: generated.seed,
+    synthetic_demo_generated_at: generated.generated_at,
+    activation_eligible: true,
+  };
+  const { error: statusInsertError } = await admin.from('smart_kasbon_model_training_attempts').upsert({
+    store_id: storeId,
+    attempted_at: now.toISOString(),
+    state: 'ML_TRAINING',
+    eligible_count: training.counts.eligible_count,
+    on_time_count: training.counts.training_class_counts.positive
+      + training.counts.evaluation_class_counts.positive,
+    late_count: training.counts.training_class_counts.negative
+      + training.counts.evaluation_class_counts.negative,
+    exclusion_counts: { synthetic_demo_dataset: generated.examples.length },
+    last_error_code: null,
+    last_trained_at: null,
+    updated_at: now.toISOString(),
+  }, { onConflict: 'store_id' });
+  if (statusInsertError) throw statusInsertError;
+
+  const { error: insertError } = await admin.from('smart_kasbon_model_versions').insert({
+    store_id: storeId,
+    version: training.model.version,
+    state: 'shadow',
+    feature_version: training.model.feature_version,
+    model: training.model,
+    metrics,
+    training_count: metrics.training_count,
+    evaluation_count: metrics.evaluation_count,
+  });
+  if (insertError) throw insertError;
+
+  const { data: activated, error: activateError } = await admin.rpc('activate_smart_kasbon_model', {
+    p_store_id: storeId,
+    p_version: training.model.version,
+  });
+  if (activateError) throw activateError;
+  if (activated !== true) throw new Error('Model demonstrasi tidak berhasil diaktifkan.');
+
+  await updateModelTrainingStatus(admin, storeId, {
+    state: 'ML_ACTIVE',
+    eligible_count: training.counts.eligible_count,
+    on_time_count: training.counts.training_class_counts.positive
+      + training.counts.evaluation_class_counts.positive,
+    late_count: training.counts.training_class_counts.negative
+      + training.counts.evaluation_class_counts.negative,
+    exclusion_counts: { synthetic_demo_dataset: generated.examples.length },
+    last_error_code: null,
+    last_trained_at: training.model.trained_at,
+  });
+  const { error: registryError } = await admin.from('smart_kasbon_demo_stores')
+    .update({ seeded_at: now.toISOString() })
+    .eq('store_id', storeId).eq('owner_id', ownerId)
+    .eq('marker', SMART_KASBON_DEMO_MARKER);
+  if (registryError) throw registryError;
+
+  return {
+    state: 'ML_ACTIVE',
+    version: training.model.version,
+    training_count: metrics.training_count,
+    evaluation_count: metrics.evaluation_count,
+    metrics,
+    synthetic_demo: true,
+    demo_marker: SMART_KASBON_DEMO_MARKER,
+    expires_at: demoRegistration.expires_at,
+    advisory_only: true,
+  };
+}
+
 async function advisoryPrediction(
   admin: AdminClient,
   storeId: string,
+  ownerId: string,
   loanId: string,
   decision: Record<string, unknown>,
   amount: number,
@@ -256,8 +440,9 @@ async function advisoryPrediction(
       });
     }
     const minimums = configuredModelMinimums();
-    if (!isSmartKasbonModelProductionEligible(activeModel.metrics, minimums)) {
-      throw new TypeError('Active Smart Kasbon model has no verified production training provenance.');
+    const demoRegistration = await getDemoRegistration(admin, storeId);
+    if (!smartKasbonModelEligibleForStore(activeModel.metrics, demoRegistration, minimums)) {
+      throw new TypeError('Active Smart Kasbon model has no verified production or demo-only provenance.');
     }
     const features = smartKasbonFeatureVector({
       amount,
@@ -281,7 +466,13 @@ async function advisoryPrediction(
       console.error('Smart Kasbon active artifact failed validation; using rule-based fallback.');
       throw new TypeError('Active model artifact or evaluation eligibility is invalid.');
     }
-    return result;
+    return demoRegistration ? {
+      ...result,
+      synthetic_demo: true,
+      demo_marker: SMART_KASBON_DEMO_MARKER,
+      limitations: 'Prediksi advisory dari dataset sintetis khusus demonstrasi; bukan data pelanggan nyata, bukan jaminan pelunasan, dan tidak mengubah keputusan aturan server.',
+      advisory_only: true,
+    } : result;
   } catch (error) {
     console.error('Smart Kasbon ML inference failed; using rule-based fallback.', error);
     if (activeModel?.version) {
@@ -344,7 +535,8 @@ Deno.serve(async (request) => {
       .select('role').eq('store_id', storeId).eq('user_id', userData.user.id).maybeSingle();
     if (memberError) throw memberError;
     if (!membership) return Response.json({ error: 'Akun tidak memiliki akses ke toko ini.' }, { status: 403, headers });
-    const ownerOnly = ['bootstrap', 'set_policy', 'sync_finance', 'evaluate_model', 'activate_model', 'clear_history'].includes(action);
+    const demoRegistration = await getDemoRegistration(admin, storeId);
+    const ownerOnly = ['bootstrap', 'set_policy', 'sync_finance', 'evaluate_model', 'activate_model', 'clear_history', 'setup_demo'].includes(action);
     if (ownerOnly && membership.role !== 'owner') {
       return Response.json({ error: 'Aksi ini hanya dapat dilakukan pemilik toko.' }, { status: 403, headers });
     }
@@ -353,7 +545,9 @@ Deno.serve(async (request) => {
     }
 
     let result: unknown;
-    if (action === 'quote') {
+    if (action === 'setup_demo') {
+      result = await setupSmartKasbonDemo(admin, storeId, userData.user.id, demoRegistration);
+    } else if (action === 'quote') {
       const customerId = uuid(payload.customer_id, 'ID pelanggan');
       const { data: evaluation, error: evaluationError } = await admin.rpc('smart_kasbon_evaluate', {
         p_store_id: storeId,
@@ -446,7 +640,7 @@ Deno.serve(async (request) => {
         try {
           validateSmartKasbonModelArtifact(activeModel.model);
           if (activeModel.model.feature_version !== activeModel.feature_version
-            || !isSmartKasbonModelProductionEligible(activeModel.metrics, minimums)) {
+            || !smartKasbonModelEligibleForStore(activeModel.metrics, demoRegistration, minimums)) {
             throw new TypeError('Active model eligibility or artifact metadata is invalid.');
           }
         } catch (error) {
@@ -462,6 +656,9 @@ Deno.serve(async (request) => {
         }
       }
       result = {
+        demo_mode: Boolean(demoRegistration),
+        demo_expires_at: demoRegistration?.expires_at ?? null,
+        demo_marker: demoRegistration?.marker ?? null,
         policy,
         health,
         summary: {
@@ -594,16 +791,24 @@ Deno.serve(async (request) => {
         }
       }
     } else if (action === 'sync_finance') {
-      const snapshot = financeSnapshot(payload.financial_snapshot);
-      const policy = deriveSmartKasbonAutoPolicy(snapshot);
-      const { data, error } = await admin.rpc('smart_kasbon_auto_configure', {
-        p_store_id: storeId,
-        p_actor: userData.user.id,
-        p_policy: policy,
-        p_financial_snapshot: snapshot,
-      });
-      if (error) throw error;
-      result = data;
+      if (demoRegistration) {
+        result = {
+          updated: false,
+          demo_mode: true,
+          reason: 'Ringkasan kesehatan sintetis demo dikelola khusus backend dan tidak ditimpa oleh sinkronisasi perangkat.',
+        };
+      } else {
+        const snapshot = financeSnapshot(payload.financial_snapshot);
+        const policy = deriveSmartKasbonAutoPolicy(snapshot);
+        const { data, error } = await admin.rpc('smart_kasbon_auto_configure', {
+          p_store_id: storeId,
+          p_actor: userData.user.id,
+          p_policy: policy,
+          p_financial_snapshot: snapshot,
+        });
+        if (error) throw error;
+        result = data;
+      }
     } else if (action === 'activate_model') {
       const version = String(payload.version ?? '');
       if (!MODEL_VERSION_PATTERN.test(version)) throw new ValidationError('Versi model tidak valid.');
@@ -614,7 +819,7 @@ Deno.serve(async (request) => {
       if (!candidate) throw new ValidationError('Kandidat model tidak ditemukan atau sudah berubah status.');
       validateSmartKasbonModelArtifact(candidate.model);
       if (candidate.model.feature_version !== candidate.feature_version
-        || !isSmartKasbonModelProductionEligible(candidate.metrics, configuredModelMinimums())) {
+        || !smartKasbonModelEligibleForStore(candidate.metrics, demoRegistration, configuredModelMinimums())) {
         throw new ValidationError('Kandidat model belum memenuhi syarat aktivasi advisory.');
       }
       const { data: activated, error: activateError } = await admin.rpc('activate_smart_kasbon_model', {
@@ -679,6 +884,7 @@ Deno.serve(async (request) => {
           modelPrediction = await advisoryPrediction(
             admin,
             storeId,
+            userData.user.id,
             String(rpcPayload.loan_id),
             decision,
             Number(rpcPayload.amount),

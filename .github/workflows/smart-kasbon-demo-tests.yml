@@ -1,0 +1,36 @@
+name: Verify WarungPintar Smart Kasbon demo
+
+on:
+  pull_request:
+    paths:
+      - 'js/**'
+      - 'css/**'
+      - 'index.html'
+      - 'sw.js'
+      - 'supabase/functions/**'
+      - 'supabase/migrations/**'
+      - 'tests/**'
+      - 'package.json'
+      - 'package-lock.json'
+  push:
+    branches:
+      - feat/isolated-production-smart-kasbon-demo
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Use Node.js 24
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+      - name: Install dependencies
+        run: npm ci
+      - name: Run complete test suite
+        run: npm test

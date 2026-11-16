@@ -459,6 +459,14 @@ async function fetchSmartKasbon(force = false) {
       let dashboard = await cloud.smartKasbon('dashboard');
       assertSmartKasbonContext(expected);
 
+      if (expected.role === 'owner' && dashboard.demo_mode === true
+        && dashboard.model?.status !== 'ML_ACTIVE') {
+        await cloud.smartKasbon('setup_demo');
+        assertSmartKasbonContext(expected);
+        dashboard = await cloud.smartKasbon('dashboard');
+        assertSmartKasbonContext(expected);
+      }
+
       // ML berjalan sepenuhnya di backend setelah dataset toko matang.
       // Rule-Based tetap menjadi penentu limit dan persetujuan kasbon.
       if (expected.role === 'owner') {
@@ -1692,7 +1700,21 @@ function vKasbon() {
       </span>
       <span class="right"><b>${rp(sisa)}</b><small>dari total ${rp(d.jumlah)}</small><span class="acts">${sisa > 0 ? `<button class="btn small" data-act="paydebt" data-id="${esc(d.id)}">Catat pembayaran</button><a class="btn small ghost" target="_blank" rel="noopener" href="${L.waLink(c.wa, L.reminderText(c.nama, sisa, S.cfg.toko, d.jatuhTempo))}">Kirim pengingat</a>` : '<span class="chip ok">Lunas</span>'}</span></span></li>`;
   };
-  return `<section class="grid2"><div class="stat"><span>Total piutang</span><b>${rp(L.totalReceivable(S.debts, S.payments))}</b></div><div class="stat"><span>Pelanggan</span><b>${S.customers.length}</b></div></section>
+  const demoModel = S.smartKasbon?.model?.active_model;
+  const demoBanner = S.smartKasbon?.demo_mode === true
+    ? `<section class="card" aria-label="Mode demonstrasi Smart Kasbon">
+        <div class="row" style="align-items:center;justify-content:space-between">
+          <strong>Smart Kasbon · Demonstrasi</strong>
+          <span class="chip warn">DATA SIMULASI</span>
+        </div>
+        <p>Riwayat pelatihan dan metrik dibuat secara sintetis untuk demonstrasi. Data ini bukan transaksi pelanggan nyata dan tidak digunakan untuk melatih model toko lain.</p>
+        <p><strong>${demoModel ? 'Machine Learning aktif (advisory)' : 'Menyiapkan model Machine Learning...'}</strong></p>
+        ${demoModel ? `<small>Training: ${Number(demoModel.training_count || 0)} observasi · Evaluasi: ${Number(demoModel.evaluation_count || 0)} observasi</small>` : ''}
+        ${S.smartKasbon.demo_expires_at ? `<small>Berlaku sampai ${esc(fmtDateTime(S.smartKasbon.demo_expires_at))}</small>` : ''}
+        <small>Rule-Based tetap menjadi penentu batas dan persetujuan kasbon.</small>
+      </section>`
+    : '';
+  return `${demoBanner}<section class="grid2"><div class="stat"><span>Total piutang</span><b>${rp(L.totalReceivable(S.debts, S.payments))}</b></div><div class="stat"><span>Pelanggan</span><b>${S.customers.length}</b></div></section>
   <div class="row"><button class="btn primary" data-act="newcust2">Tambah pelanggan</button>${OWNER() ? '<button class="btn" data-act="manualdebt">Catat kasbon manual</button>' : ''}</div>
   <h2>Belum lunas</h2><ul class="rows tall">${open.length ? open.map(row).join('') : '<li class="muted">Tidak ada kasbon yang belum lunas.</li>'}</ul>
   <button class="btn ghost small" data-act="togglelunas">${S.showLunas ? 'Sembunyikan' : 'Tampilkan'} kasbon lunas (${closed.length})</button>
