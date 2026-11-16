@@ -84,6 +84,27 @@ body.app-ready .app-splash { opacity: 0; visibility: hidden; pointer-events: non
 .chip.staging[hidden] { display: none; }
 .top-r #role { display: flex; gap: 6px; align-items: center; justify-content: flex-end; flex-wrap: wrap; min-width: 0; }
 .top-r #role > .chip { max-width: 190px; overflow-wrap: anywhere; }
+.account-status-btn { display: inline-flex; flex: 0 0 36px; align-items: center; justify-content: center; width: 36px; height: 36px; min-height: 36px; padding: 0; border: 1px solid rgba(255,255,255,.62); border-radius: 50%; background: rgba(255,255,255,.08); color: #fff; cursor: pointer; }
+.account-status-btn:hover, .account-status-btn[aria-expanded="true"] { background: rgba(255,255,255,.2); }
+.account-status-btn:focus-visible { outline: 2px solid #fff; outline-offset: 3px; }
+.account-status-dot { display: block; width: 11px; height: 11px; border: 2px solid rgba(255,255,255,.8); border-radius: 50%; background: #22c55e; box-shadow: 0 0 0 2px rgba(255,255,255,.14); }
+.account-status-btn[data-state="syncing"] .account-status-dot { background: #facc15; }
+.account-status-btn[data-state="offline"] .account-status-dot { background: #9ca3af; }
+.account-status-btn[data-state="error"] .account-status-dot { background: #ef4444; }
+.account-status-panel { position: absolute; top: calc(100% + 8px); right: 12px; z-index: 40; width: min(360px, calc(100vw - 24px)); padding: 14px; border: 1px solid var(--garis); border-radius: 12px; background: #fff; color: var(--tinta); box-shadow: 0 12px 32px rgba(13,26,58,.2); }
+.account-status-panel[hidden] { display: none; }
+.account-status-panel-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.account-status-panel-close { display: inline-grid; place-items: center; width: 32px; height: 32px; min-height: 32px; border: 1px solid var(--garis); border-radius: 50%; background: #fff; color: var(--tinta); font: inherit; font-size: 1.2rem; cursor: pointer; }
+.account-status-panel-state { display: flex; align-items: center; gap: 9px; margin: 12px 0 6px; }
+.account-status-panel-dot { width: 11px; height: 11px; flex: 0 0 11px; border-radius: 50%; background: #22c55e; }
+.account-status-panel-dot[data-state="syncing"] { background: #eab308; }
+.account-status-panel-dot[data-state="offline"] { background: #9ca3af; }
+.account-status-panel-dot[data-state="error"] { background: #ef4444; }
+.account-status-panel p { margin: 4px 0 10px; color: var(--abu); font-size: .9rem; }
+.account-status-panel dl { display: grid; gap: 7px; margin: 0; }
+.account-status-panel dl div { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; font-size: .84rem; }
+.account-status-panel dt { color: var(--abu); }
+.account-status-panel dd { margin: 0; max-width: 68%; overflow-wrap: anywhere; text-align: right; font-weight: 600; }
 .top .btn.ghost { color: #fff; border-color: rgba(255,255,255,.6); }
 main { width: min(100%, 720px); margin: 0 auto; padding: 14px 14px 24px; display: grid; gap: 14px; }
 .auth-card { width: min(100%, 520px); justify-self: center; }
@@ -341,6 +362,7 @@ dialog::backdrop { background: rgba(23,32,51,.55); }
 @media (min-width: 720px) { body { font-size: 18px; } .pgrid { max-height: 48vh; } }
 @media (max-width: 520px) {
   .top-r #net, .top-r #sync { display: none; }
+  .account-status-btn { width: 34px; height: 34px; min-height: 34px; flex-basis: 34px; }
   .top-r { width: auto; max-width: 52%; }
   .top-r #role { gap: 4px; }
   .top-r #role > .chip:first-child { max-width: 116px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }

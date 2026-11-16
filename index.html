@@ -14,7 +14,7 @@
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="default">
   <meta name="apple-mobile-web-app-title" content="Warung Pintar">
-  <link rel="stylesheet" href="css/style.css?v=48">
+  <link rel="stylesheet" href="css/style.css?v=49">
   <title>Warung Pintar</title>
 </head>
 <body>
@@ -31,13 +31,14 @@
   </div>
   <header class="top no-print">
     <div><p class="brand" id="toko">WarungPintar</p><h1 id="judul">Beranda</h1></div>
-    <div class="top-r"><span id="environment" class="chip staging" hidden></span><span id="net" class="chip ok">Online</span><span id="sync"></span><span id="role"></span></div>
+    <div class="top-r"><span id="environment" class="chip staging" hidden></span><span id="net" class="chip ok">Online</span><span id="sync"></span><button id="account-status" class="account-status-btn" type="button" data-state="online" aria-label="Status akun: daring" aria-haspopup="true" aria-expanded="false" aria-controls="account-status-panel" title="Status akun: daring"><span class="account-status-dot" aria-hidden="true"></span></button><span id="role"></span></div>
+    <section id="account-status-panel" class="account-status-panel" role="status" aria-live="polite" hidden></section>
   </header>
   <main id="view" aria-live="polite"><p class="muted">Memuat...</p></main>
   <nav id="nav" class="bottom no-print" aria-label="Menu utama"></nav>
   <dialog id="dlg"></dialog>
   <div id="toast" class="toast" role="status"></div>
   <noscript><p>WarungPintar membutuhkan JavaScript.</p></noscript>
-  <script type="module" src="js/app.js?v=48"></script>
+  <script type="module" src="js/app.js?v=49"></script>
 </body>
 </html>
